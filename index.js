@@ -23,20 +23,20 @@ const api = axios.create({
 });
 
 const cache = new Map();           // url -> { data, ts }
-const TTL_MS = 10 * 60 * 1000;     // 10분 캐시
+const TTL_MS = 9 * 60 * 1000;      // 9분 캐시 (갱신 간격보다 짧게)
 
-async function cachedGet(url) {
+async function cachedGet(url, { force = false } = {}) {
   const now = Date.now();
   const c = cache.get(url);
-  if (c && now - c.ts < TTL_MS) return c.data;
+  if (!force && c && now - c.ts < TTL_MS) return c.data;
   const { data } = await api.get(url);
   cache.set(url, { data, ts: now });
   return data;
 }
 
-async function getSiblings(name) {
+async function getSiblings(name, opts) {
   const url = `/characters/${encodeURIComponent(name)}/siblings`;
-  return cachedGet(url); // [{ CharacterName, CharacterClassName, ItemAvgLevel, ServerName, ... }]
+  return cachedGet(url, opts); // [{ CharacterName, CharacterClassName, ItemAvgLevel, ServerName, ... }]
 }
 
 // ===================== 파일 I/O =====================
@@ -61,7 +61,7 @@ const commands = [
   new SlashCommandBuilder().setName('mychars')
     .setDescription('내 계정의 모든 캐릭터 목록'),
   new SlashCommandBuilder().setName('board-refresh')
-    .setDescription('현황판 즉시 갱신'),
+    .setDescription('현황판 즉시 갱신(없으면 1회 생성)'),
   new SlashCommandBuilder().setName('board-stop')
     .setDescription('현황판 자동 갱신 중지'),
 ].map(c => c.toJSON());
@@ -78,6 +78,11 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
+  // 환경변수에 고정 값이 있으면 바인딩(선택 사항)
+  if (process.env.BOARD_CHANNEL_ID) board.channelId = process.env.BOARD_CHANNEL_ID;
+  if (process.env.BOARD_MESSAGE_ID) board.messageId = process.env.BOARD_MESSAGE_ID;
+  saveJSON(BOARD_PATH, board);
+
   // 부팅 시 자동 갱신 재개(설정 ON 이고 보드 위치를 알고 있으면)
   if (board.enabled) startAutoRefresh();
 });
@@ -90,7 +95,7 @@ client.on('interactionCreate', async (i) => {
     const name = i.options.getString('name', true).trim();
 
     try {
-      const sib = await getSiblings(name);
+      const sib = await getSiblings(name, { force: true });
       if (!Array.isArray(sib) || sib.length === 0) {
         return i.reply({ content: `❌ **${name}** 캐릭터를 찾지 못했어요.`, ephemeral: true });
       }
@@ -102,10 +107,10 @@ client.on('interactionCreate', async (i) => {
       // 2) 개인 목록 즉시 출력
       await replyMyChars(i, name);
 
-      // 3) 현황판 메시지 확보(없으면 자동 생성)
-      //await ensureBoardMessage(i);
+      // 3) 현황판 메시지 확보(없으면 1회 생성) — 최초 1개만 생성
+      await ensureBoardMessage(i);
 
-      // 4) 자동 갱신 스타트
+      // 4) 자동 갱신 스타트(이미 동작 중이면 재시작)
       if (!board.enabled) {
         board.enabled = true;
         saveJSON(BOARD_PATH, board);
@@ -141,12 +146,12 @@ client.on('interactionCreate', async (i) => {
     }
   }
 
-  // /board-refresh : 즉시 갱신
+  // /board-refresh : 즉시 갱신(없으면 1회 생성)
   if (i.commandName === 'board-refresh') {
     await i.deferReply({ ephemeral: true });
     try {
-      //await ensureBoardMessage(i); // 혹시 없으면 만든다
-      await refreshBoardOnce();
+      await ensureBoardMessage(i); // 없으면 이때만 생성
+      await refreshBoardOnce(true); // 강제 API 호출 포함
       await i.editReply('🔄 현황판을 갱신했습니다.');
     } catch (e) {
       console.error('board-refresh error:', e);
@@ -165,7 +170,7 @@ client.on('interactionCreate', async (i) => {
 
 // ===================== 유틸: 개인 목록 임베드 응답 =====================
 async function replyMyChars(i, mainName) {
-  const chars = await getSiblings(mainName);
+  const chars = await getSiblings(mainName, { force: true });
   const sorted = [...chars].sort((a, b) => parseFloat(b.ItemAvgLevel) - parseFloat(a.ItemAvgLevel));
   const displayName = i.member?.displayName || i.user.username;
 
@@ -176,7 +181,6 @@ async function replyMyChars(i, mainName) {
     ).join('\n'))
     .setColor(0x00AE86);
 
-  // /link 직후에도 보이고, /mychars 호출에도 보이도록 reply 사용
   if (i.replied || i.deferred) {
     await i.editReply({ embeds: [embed] }).catch(async () => i.followUp({ embeds: [embed] }));
   } else {
@@ -186,11 +190,11 @@ async function replyMyChars(i, mainName) {
 
 // ===================== 현황판(보드) 생성/빌드/갱신 =====================
 async function ensureBoardMessage(iOrNull) {
-  // 1) 채널 결정: 우선순위 => env(B BOARD_CHANNEL_ID) > 저장된 board.channelId > (interaction 채널)
+  // 1) 채널 결정: 우선순위 => env(BOARD_CHANNEL_ID) > 저장된 board.channelId > (interaction 채널)
   let channelId = process.env.BOARD_CHANNEL_ID || board.channelId || null;
   if (!channelId && iOrNull) channelId = iOrNull.channelId;
   if (!channelId) {
-    console.log('⚠️ 보드 채널 정보를 알 수 없어 생성 보류 (다음 /link 나 /board-refresh 때 시도)');
+    console.log('⚠️ 보드 채널 정보를 알 수 없어 생성 보류');
     return;
   }
 
@@ -206,8 +210,8 @@ async function ensureBoardMessage(iOrNull) {
     if (msg) return; // 이미 있음
   }
 
-  // 새로 생성
-  const embed = await buildBoardEmbed();
+  // 새로 생성 (최초 1회만)
+  const embed = await buildBoardEmbed(true);
   const msg = await channel.send({ embeds: [embed] });
   board.channelId  = channel.id;
   board.messageId  = msg.id;
@@ -215,7 +219,7 @@ async function ensureBoardMessage(iOrNull) {
   console.log(`🧷 현황판 메시지 생성 (channel=${board.channelId}, message=${board.messageId})`);
 }
 
-async function buildBoardEmbed() {
+async function buildBoardEmbed(force = false) {
   if (!links || Object.keys(links).length === 0) {
     return new EmbedBuilder()
       .setTitle('서버 현황판')
@@ -227,7 +231,7 @@ async function buildBoardEmbed() {
   for (const [userId, main] of Object.entries(links)) {
     try {
       await wait(API_DELAY_PER_USER_MS);
-      const chars = await getSiblings(main);
+      const chars = await getSiblings(main, { force });
       if (!chars?.length) {
         lines.push(`<@${userId}> — ${main}: ❌ 조회 실패`);
         continue;
@@ -246,38 +250,44 @@ async function buildBoardEmbed() {
     .setColor(0xFFD700);
 }
 
-async function refreshBoardOnce() {
+async function refreshBoardOnce(force = false) {
   if (!board.channelId || !board.messageId) {
-    console.log('ℹ️ 보드 메시지가 없어 갱신 생략 (ensureBoardMessage로 생성 예정)');
+    console.log('ℹ️ 보드 메시지가 없어 갱신 생략');
     return;
   }
   const channel = await client.channels.fetch(board.channelId).catch(() => null);
-  if (!channel) return;
-  const msg = await channel.messages.fetch(board.messageId).catch(() => null);
-
-  const embed = await buildBoardEmbed();
-  if (msg) {
-    await msg.edit({ embeds: [embed] });
-  } else {
-    const newMsg = await channel.send({ embeds: [embed] });
-    board.messageId = newMsg.id;
-    saveJSON(BOARD_PATH, board);
+  if (!channel) {
+    console.log('⚠️ 채널을 찾지 못해 갱신 생략');
+    return;
   }
+  const msg = await channel.messages.fetch(board.messageId).catch(() => null);
+  if (!msg) {
+    console.log('⚠️ 보드 메시지를 찾을 수 없어 편집 생략(신규 생성 안 함)');
+    return;
+  }
+
+  const embed = await buildBoardEmbed(force);
+  await msg.edit({ embeds: [embed] });
 }
 
 // ===================== 자동 갱신 타이머 =====================
 let refreshTimer = null;
 function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
-  refreshTimer = setInterval(async () => {
+
+  const tick = async () => {
     try {
-      // 보드가 없으면 만들고(채널을 모르면 대기), 있으면 갱신
-      await ensureBoardMessage(null);
-      await refreshBoardOnce();
+      // 자동 루프에서는 "절대 새 메시지 생성" 안 함 → 편집만 시도
+      await refreshBoardOnce(true); // 주기 갱신 시에도 강제 API 호출
     } catch (e) {
       console.error('auto refresh error:', e);
     }
-  }, REFRESH_INTERVAL_MS);
+  };
+
+  // 즉시 1회 실행
+  tick();
+  // 이후 주기 실행
+  refreshTimer = setInterval(tick, REFRESH_INTERVAL_MS);
   console.log('⏱️ 현황판 자동 갱신 시작');
 }
 function stopAutoRefresh() {
