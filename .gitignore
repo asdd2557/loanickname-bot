@@ -1,0 +1,13 @@
+# dependencies
+node_modules/
+
+# secrets & local data
+.env
+Token.env
+links.json
+board.json
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
