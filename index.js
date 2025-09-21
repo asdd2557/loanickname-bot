@@ -103,7 +103,7 @@ client.on('interactionCreate', async (i) => {
       await replyMyChars(i, name);
 
       // 3) 현황판 메시지 확보(없으면 자동 생성)
-      await ensureBoardMessage(i);
+      //await ensureBoardMessage(i);
 
       // 4) 자동 갱신 스타트
       if (!board.enabled) {
@@ -145,7 +145,7 @@ client.on('interactionCreate', async (i) => {
   if (i.commandName === 'board-refresh') {
     await i.deferReply({ ephemeral: true });
     try {
-      await ensureBoardMessage(i); // 혹시 없으면 만든다
+      //await ensureBoardMessage(i); // 혹시 없으면 만든다
       await refreshBoardOnce();
       await i.editReply('🔄 현황판을 갱신했습니다.');
     } catch (e) {
