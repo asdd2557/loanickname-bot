@@ -12,12 +12,12 @@ import { Agent as HttpAgent } from 'http';
 import { Agent as HttpsAgent } from 'https';
 
 // ===================== 기본 설정 =====================
-const REFRESH_INTERVAL_MS = 1 * 60 * 1000;  // 테스트 1분 (운영은 10분 권장)
-const API_DELAY_PER_USER_MS = 300;          // Lost Ark API 호출 사이 지연
-const EDIT_DELAY_MS        = 500;           // 메시지 편집 사이 지연
-const SCAN_LIMIT_PER_CHANNEL = 50;          // 채널당 최근 N개 메시지 탐색
+const REFRESH_INTERVAL_MS = 10 * 60 * 1000;  // 10분 (운영 권장)
+const API_DELAY_PER_USER_MS = 300;           // Lost Ark API 호출 사이 지연
+const EDIT_DELAY_MS        = 500;            // 메시지 편집 사이 지연
+const SCAN_LIMIT_PER_CHANNEL = 50;           // 채널당 최근 N개 메시지 탐색
 const PERSIST_DIR = '.';
-const EPHEMERAL   = 1 << 6;                 // interaction flags
+const EPHEMERAL   = 1 << 6;                  // interaction flags
 const BOARD_TAG   = '[LOA_BOARD]';
 
 // ===================== HTTP keep-alive: 부팅 즉시 시작 =====================
@@ -137,15 +137,15 @@ async function loginWithRetry(maxTries = 5) {
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   try {
-    await registerCommands();           // top-level await 제거: 여기서 등록
+    await registerCommands();
   } catch (e) {
     console.error('registerCommands error:', e?.rawError ?? e);
   }
 
-  try { await discoverBoards(); }       // 부팅 시 보드 자동 탐색/등록
+  try { await discoverBoards(); }
   catch (e) { console.error('discoverBoards error:', e?.rawError ?? e); }
 
-  startAutoRefresh();                   // 자동 갱신 루프
+  startAutoRefresh();
 });
 
 client.on('interactionCreate', async (i) => {
@@ -387,20 +387,24 @@ async function buildBoardEmbed() {
     .setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR',{ timeZone:'Asia/Seoul' })}` })
     .setColor(0xFFD700);
 }
-async function buildPersonalEmbed(userId, mainName) {
+
+// ★★★ 여기부터 '닉네임만' 사용하도록 수정됨 ★★★
+async function buildPersonalEmbed(userId, mainName, channelId) {
   const chars = await getSiblings(mainName, { force: true });
   const sorted = [...chars].sort((a,b) => toLevelNum(b.ItemAvgLevel) - toLevelNum(a.ItemAvgLevel));
   const lines = sorted.map(c =>
     `• **${c.CharacterName}** (${c.CharacterClassName}) — ${c.ServerName} | 아이템 레벨 ${c.ItemAvgLevel}`
   );
+  const displayName = await getDisplayName(userId, channelId); // 디코 닉네임만
   return new EmbedBuilder()
-    .setTitle(`**<@${userId}>**님의 캐릭터 목록`)
+    .setTitle(`**${displayName}**님의 캐릭터 목록`)
     .setDescription(lines.join('\n'))
     .setColor(0x00AE86)
     .setFooter({ text: `${BOARD_TAG} 개인 • 마지막 갱신: ${new Date().toLocaleString('ko-KR',{ timeZone:'Asia/Seoul' })}` });
 }
+
 async function replyMyChars(i, mainName, isPublic = false) {
-  const embed = await buildPersonalEmbed(i.user.id, mainName);
+  const embed = await buildPersonalEmbed(i.user.id, mainName, i.channelId);
   const payload = { embeds: [embed] };
   if (!isPublic) payload.flags = EPHEMERAL;   // 기본은 에페메랄
   if (i.replied || i.deferred) {
@@ -420,7 +424,7 @@ async function ensurePersonalPinnedInChannel(channelId, userId, mainName) {
     const och = await client.channels.fetch(old.channelId).catch(()=>null);
     existing = och ? await och.messages.fetch(old.messageId).catch(()=>null) : null;
   }
-  const embed = await buildPersonalEmbed(userId, mainName);
+  const embed = await buildPersonalEmbed(userId, mainName, channelId);
   if (!existing) {
     const msg = await ch.send({ embeds: [embed] }); // 공개
     links[userId] = { ...me, personal: { channelId: ch.id, messageId: msg.id } };
@@ -463,13 +467,20 @@ async function refreshAllPersonalOnce() {
       if (!ch) { console.error('[EDIT FAIL personal] channel not found', userId, p.channelId); continue; }
       const msg = await ch.messages.fetch(p.messageId).catch(() => null);
       if (!msg) { console.error('[EDIT FAIL personal] message not found', userId, p.channelId, p.messageId); continue; }
-      const embed = await buildPersonalEmbed(userId, main);
+      const embed = await buildPersonalEmbed(userId, main, p.channelId);
       await msg.edit({ embeds: [embed] });
       console.log('[EDIT OK personal]', userId, p.channelId, p.messageId);
     } catch (e) {
       console.error('[EDIT FAIL personal]', userId, e?.rawError ?? e);
     }
   }
+}
+
+// ===================== 닉네임(표시이름) 전용 헬퍼 =====================
+async function getDisplayName(userId, channelId) {
+  const ch = await client.channels.fetch(channelId);
+  const member = await ch.guild.members.fetch(userId);
+  return member.displayName; // 디코 닉네임만 반환
 }
 
 // ===================== 유틸 =====================
