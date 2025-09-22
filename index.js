@@ -11,16 +11,18 @@ import {
 } from 'discord.js';
 
 // ===================== 설정 =====================
-const REFRESH_INTERVAL_MS = 1 * 60 * 1000; // 1분
-const API_DELAY_PER_USER_MS = 300;          // Lost Ark API 호출 사이 지연
-const EDIT_DELAY_MS = 500;                  // 메시지 편집 사이 지연(레이트리밋 안전)
-const SCAN_LIMIT_PER_CHANNEL = 50;          // 채널당 최근 N개 메시지만 스캔
+// const REFRESH_INTERVAL_MS = 10 * 60 * 1000; // 10분
+const REFRESH_INTERVAL_MS = 1 * 60 * 1000;   // 1분 (테스트용; 원하면 10분으로 복원)
+const API_DELAY_PER_USER_MS = 300;           // Lost Ark API 호출 사이 지연
+const EDIT_DELAY_MS = 500;                   // 메시지 편집 사이 지연(레이트리밋 안전)
+const SCAN_LIMIT_PER_CHANNEL = 50;           // 채널당 최근 N개 메시지만 스캔
 const PERSIST_DIR = '.';
+const EPHEMERAL = 1 << 6;                    // interaction flags (ephemeral)
 
 // ===================== 저장 파일 =====================
-const LINKS_PATH = path.join(PERSIST_DIR, 'links.json');   // { userId: { main, personal? } }
+const LINKS_PATH = path.join(PERSIST_DIR, 'links.json');   // { userId: { main } }
 const BOARDS_PATH = path.join(PERSIST_DIR, 'boards.json'); // [{channelId, messageId}]
-const BOARD_TAG = '[LOA_BOARD]';                           // 우리 보드 식별 마커(푸터에 넣음)
+const BOARD_TAG = '[LOA_BOARD]';                           // 보드 식별 마커(푸터에 넣음)
 
 // ===================== 로아 API =====================
 const api = axios.create({
@@ -29,7 +31,7 @@ const api = axios.create({
 });
 
 const cache = new Map();           // url -> { data, ts }
-const TTL_MS = 60 * 1000; // 디버그용 1분 (확인되면 5~10분 등으로 조절)
+const TTL_MS = 60 * 1000;          // 디버그용 1분 (확인되면 5~10분 등으로 조절)
 
 async function cachedGet(url, { force = false } = {}) {
   const now = Date.now();
@@ -99,12 +101,6 @@ const toLevelNum = (s) => parseFloat(String(s).replace(/,/g, '') || '0');
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // (선택) .env에 고정된 특정 보드가 있으면 목록에 포함
-  if (process.env.BOARD_CHANNEL_ID && process.env.BOARD_MESSAGE_ID) {
-    addBoard(process.env.BOARD_CHANNEL_ID, process.env.BOARD_MESSAGE_ID);
-    console.log('📌 env 보드 추가:', process.env.BOARD_CHANNEL_ID, process.env.BOARD_MESSAGE_ID);
-  }
-
   // 부팅 시 1회 전체 스캔(자동 등록)
   try {
     await discoverBoards();
@@ -116,7 +112,7 @@ client.once('ready', async () => {
   startAutoRefresh();
 
   // Railway(Web) 슬립 방지
-  const PORT = process.env.PORT || 3000;
+  const PORT = process.env.PORT || 8080;
   http.createServer((_, res) => res.end('ok')).listen(PORT, () => {
     console.log('🌐 HTTP keep-alive server listening on', PORT);
   });
@@ -131,17 +127,21 @@ client.on('interactionCreate', async (i) => {
     try {
       const sib = await getSiblings(name, { force: true });
       if (!Array.isArray(sib) || sib.length === 0) {
-        return i.reply({ content: `❌ **${name}** 캐릭터를 찾지 못했어요.`, ephemeral: true });
+        return i.reply({ content: `❌ **${name}** 캐릭터를 찾지 못했어요.`, flags: EPHEMERAL });
       }
       const cur = links[i.user.id] || {};
       links[i.user.id] = { ...cur, main: name };
       saveJSON(LINKS_PATH, links);
 
       await replyMyChars(i, name);
-      await i.followUp?.({ content: '✅ 대표 캐릭터가 등록되었습니다.', ephemeral: true }).catch(()=>{});
+      if (!i.replied && !i.deferred) {
+        await i.reply({ content: '✅ 대표 캐릭터가 등록되었습니다.', flags: EPHEMERAL });
+      } else {
+        await i.followUp({ content: '✅ 대표 캐릭터가 등록되었습니다.', flags: EPHEMERAL }).catch(()=>{});
+      }
     } catch (e) {
       console.error('link error:', e?.response?.data || e);
-      await i.reply({ content: '❌ Lost Ark API 호출 오류', ephemeral: true });
+      await i.reply({ content: '❌ Lost Ark API 호출 오류', flags: EPHEMERAL });
     }
   }
 
@@ -152,27 +152,27 @@ client.on('interactionCreate', async (i) => {
       delete cur.main;
       links[i.user.id] = cur;
       saveJSON(LINKS_PATH, links);
-      await i.reply({ content: '🔓 연결 해제되었습니다.', ephemeral: true });
+      await i.reply({ content: '🔓 연결 해제되었습니다.', flags: EPHEMERAL });
     } else {
-      await i.reply({ content: '연결된 대표 캐릭터가 없습니다.', ephemeral: true });
+      await i.reply({ content: '연결된 대표 캐릭터가 없습니다.', flags: EPHEMERAL });
     }
   }
 
   // ===== /mychars =====
   if (i.commandName === 'mychars') {
     const main = links[i.user.id]?.main;
-    if (!main) return i.reply({ content: '먼저 `/link [캐릭터명]` 으로 연결해주세요.', ephemeral: true });
+    if (!main) return i.reply({ content: '먼저 `/link [캐릭터명]` 으로 연결해주세요.', flags: EPHEMERAL });
     try {
       await replyMyChars(i, main);
     } catch (e) {
       console.error('mychars error:', e?.response?.data || e);
-      await i.reply('❌ 캐릭터 불러오기 실패');
+      await i.reply({ content: '❌ 캐릭터 불러오기 실패', flags: EPHEMERAL });
     }
   }
 
   // ===== /board-enable =====
   if (i.commandName === 'board-enable') {
-    await i.deferReply({ ephemeral: true });
+    await i.deferReply({ flags: EPHEMERAL });
     try {
       const msg = await ensureBoardInChannel(i.channelId); // 메시지 생성 또는 재사용
       addBoard(i.channelId, msg.id);
@@ -189,12 +189,15 @@ client.on('interactionCreate', async (i) => {
     boards = boards.filter(b => b.channelId !== i.channelId);
     boardsSet = new Set(boards.map(b => boardsKey(b.channelId, b.messageId)));
     saveJSON(BOARDS_PATH, boards);
-    await i.reply({ content: before !== boards.length ? '🧹 이 채널의 보드 관리를 해제했습니다.' : 'ℹ️ 이 채널에는 등록된 보드가 없습니다.', ephemeral: true });
+    await i.reply({
+      content: before !== boards.length ? '🧹 이 채널의 보드 관리를 해제했습니다.' : 'ℹ️ 이 채널에는 등록된 보드가 없습니다.',
+      flags: EPHEMERAL
+    });
   }
 
   // ===== /board-refresh =====
   if (i.commandName === 'board-refresh') {
-    await i.deferReply({ ephemeral: true });
+    await i.deferReply({ flags: EPHEMERAL });
     try {
       await refreshAllBoards(true);
       await i.editReply('🔄 모든 보드를 즉시 갱신했습니다.');
@@ -206,7 +209,7 @@ client.on('interactionCreate', async (i) => {
 
   // ===== /board-scan =====
   if (i.commandName === 'board-scan') {
-    await i.deferReply({ ephemeral: true });
+    await i.deferReply({ flags: EPHEMERAL });
     try {
       const found = await discoverBoards();
       await i.editReply(`🔎 스캔 완료: ${found}개 보드를 관리 대상으로 등록했습니다.`);
@@ -222,11 +225,13 @@ client.on('interactionCreate', async (i) => {
 // 현재 채널에 보드가 없으면 생성, 있으면 재사용
 async function ensureBoardInChannel(channelId) {
   const ch = await client.channels.fetch(channelId);
+  if (!ch || ch.type !== ChannelType.GuildText) {
+    throw new Error('이 명령은 일반 텍스트 채널에서만 사용할 수 있어요.');
+  }
   // 기존 등록된 것부터 찾기
-  let existing = null;
   for (const b of boards) {
     if (b.channelId === channelId) {
-      existing = await ch.messages.fetch(b.messageId).catch(() => null);
+      const existing = await ch.messages.fetch(b.messageId).catch(() => null);
       if (existing) return existing;
     }
   }
@@ -282,20 +287,25 @@ async function discoverBoards() {
   return found;
 }
 
-// 모든 보드 편집
+// 모든 보드 편집 (로그 강화)
 async function refreshAllBoards(force = false) {
   console.log(`[REFRESH_ALL] count=${boards.length}`);
   for (const b of boards) {
     await wait(EDIT_DELAY_MS);
     try {
       const ch = await client.channels.fetch(b.channelId).catch(() => null);
-      if (!ch) continue;
+      if (!ch) { console.error('[EDIT FAIL] channel not found', b.channelId); continue; }
       const msg = await ch.messages.fetch(b.messageId).catch(() => null);
-      if (!msg) continue;
-      const embed = await buildBoardEmbed(true);
-      await msg.edit({ embeds: [embed] }).catch(()=>{});
+      if (!msg) { console.error('[EDIT FAIL] message not found', b.channelId, b.messageId); continue; }
+
+      const prevFooter = msg.embeds?.[0]?.footer?.text;
+      const embed = await buildBoardEmbed(true); // 항상 강제 API 호출
+      await msg.edit({ embeds: [embed] });
+
+      const nextFooter = embed.data?.footer?.text ?? embed.footer?.text;
+      console.log('[EDIT OK]', b.channelId, b.messageId, 'prev:', prevFooter, 'next:', nextFooter);
     } catch (e) {
-      console.error('board edit error:', b.channelId, b.messageId, e?.rawError ?? e);
+      console.error('[EDIT FAIL]', b.channelId, b.messageId, e?.rawError ?? e);
     }
   }
 }
@@ -313,6 +323,7 @@ async function buildBoardEmbed(force = false) {
       if (!main) continue;
       try {
         await wait(API_DELAY_PER_USER_MS);
+        // 강제 캐시 무효화
         const chars = await getSiblings(main, { force: true });
         if (!chars?.length) {
           rows.push({ userId, err: `${main}: ❌ 조회 실패` });
@@ -342,8 +353,13 @@ async function buildBoardEmbed(force = false) {
   return new EmbedBuilder()
     .setTitle('서버 현황판 (등록자 기준)')
     .setDescription(description)
-   .setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR',{ timeZone:'Asia/Seoul' })} (주기: ${Math.floor(REFRESH_INTERVAL_MS/60000)}분)` })
-
+    .setFooter({
+      text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR', {
+        timeZone: 'Asia/Seoul',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit'
+      })} (주기: ${Math.floor(REFRESH_INTERVAL_MS/60000)}분)`
+    })
     .setColor(0xFFD700);
 }
 
@@ -359,13 +375,18 @@ async function replyMyChars(i, mainName) {
       `• **${c.CharacterName}** (${c.CharacterClassName}) — ${c.ServerName} | 아이템 레벨 ${c.ItemAvgLevel}`
     ).join('\n'))
     .setColor(0x00AE86)
-.setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR',{ timeZone:'Asia/Seoul' })} (주기: ${Math.floor(REFRESH_INTERVAL_MS/60000)}분)` })
-
+    .setFooter({
+      text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR', {
+        timeZone: 'Asia/Seoul',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit'
+      })}`
+    });
 
   if (i.replied || i.deferred) {
-    await i.editReply({ embeds: [embed] }).catch(async () => i.followUp({ embeds: [embed] }));
+    await i.editReply({ embeds: [embed] }).catch(async () => i.followUp({ embeds: [embed], flags: EPHEMERAL }));
   } else {
-    await i.reply({ embeds: [embed] });
+    await i.reply({ embeds: [embed], flags: EPHEMERAL });
   }
 }
 
