@@ -29,7 +29,7 @@ const api = axios.create({
 });
 
 const cache = new Map();           // url -> { data, ts }
-const TTL_MS = 9 * 60 * 1000;      // 9분 캐시
+const TTL_MS = 60 * 1000; // 디버그용 1분 (확인되면 5~10분 등으로 조절)
 
 async function cachedGet(url, { force = false } = {}) {
   const now = Date.now();
@@ -238,6 +238,7 @@ async function ensureBoardInChannel(channelId) {
   }
   // 새로 생성
   const embed = await buildBoardEmbed(true);
+  console.log('[DATA]', main, 'best=', best.CharacterName, best.ItemAvgLevel);
   const msg = await ch.send({ embeds: [embed] });
   return msg;
 }
@@ -292,7 +293,8 @@ async function refreshAllBoards(force = false) {
       if (!ch) continue;
       const msg = await ch.messages.fetch(b.messageId).catch(() => null);
       if (!msg) continue;
-      const embed = await buildBoardEmbed(force);
+      const embed = await buildBoardEmbed(true);
+      console.log('[DATA]', main, 'best=', best.CharacterName, best.ItemAvgLevel);
       await msg.edit({ embeds: [embed] }).catch(()=>{});
     } catch (e) {
       console.error('board edit error:', b.channelId, b.messageId, e?.rawError ?? e);
@@ -313,7 +315,7 @@ async function buildBoardEmbed(force = false) {
       if (!main) continue;
       try {
         await wait(API_DELAY_PER_USER_MS);
-        const chars = await getSiblings(main, { force });
+        const chars = await getSiblings(main, { force: true });
         if (!chars?.length) {
           rows.push({ userId, err: `${main}: ❌ 조회 실패` });
           continue;
@@ -342,7 +344,7 @@ async function buildBoardEmbed(force = false) {
   return new EmbedBuilder()
     .setTitle('서버 현황판 (등록자 기준)')
     .setDescription(description)
-   .setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}` })
+   .setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR',{ timeZone:'Asia/Seoul' })} (주기: ${Math.floor(REFRESH_INTERVAL_MS/60000)}분)` })
 
     .setColor(0xFFD700);
 }
@@ -359,7 +361,7 @@ async function replyMyChars(i, mainName) {
       `• **${c.CharacterName}** (${c.CharacterClassName}) — ${c.ServerName} | 아이템 레벨 ${c.ItemAvgLevel}`
     ).join('\n'))
     .setColor(0x00AE86)
-.setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}` })
+.setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR',{ timeZone:'Asia/Seoul' })} (주기: ${Math.floor(REFRESH_INTERVAL_MS/60000)}분)` })
 
 
   if (i.replied || i.deferred) {
