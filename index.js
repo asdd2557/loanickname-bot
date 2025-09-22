@@ -11,12 +11,12 @@ import {
 } from 'discord.js';
 
 // ===================== 설정 =====================
-const REFRESH_INTERVAL_MS = 1 * 60 * 1000;   // 1분 (테스트용)
+const REFRESH_INTERVAL_MS = 1 * 60 * 1000;   // 1분 (테스트용; 원하면 10분으로)
 const API_DELAY_PER_USER_MS = 300;
 const EDIT_DELAY_MS = 500;
 const SCAN_LIMIT_PER_CHANNEL = 50;
 const PERSIST_DIR = '.';
-const EPHEMERAL = 1 << 6;
+const EPHEMERAL = 1 << 6; // interaction flags (ephemeral)
 const BOARD_TAG = '[LOA_BOARD]';
 
 // ===================== 저장 파일 =====================
@@ -30,7 +30,7 @@ const api = axios.create({
 });
 
 const cache = new Map();
-const TTL_MS = 60 * 1000;
+const TTL_MS = 60 * 1000; // 디버그용 1분 (확인되면 5~10분 등으로 조절)
 
 async function cachedGet(url, { force = false } = {}) {
   const now = Date.now();
@@ -55,8 +55,8 @@ function saveJSON(file, obj) {
   catch { /* read-only 대비 */ }
 }
 
-let links  = loadJSON(LINKS_PATH, {});
-let boards = loadJSON(BOARDS_PATH, []);
+let links  = loadJSON(LINKS_PATH, {});  // { userId: { main, personal? } }
+let boards = loadJSON(BOARDS_PATH, []); // [{channelId, messageId}]
 const boardsKey = (c, m) => `${c}:${m}`;
 let boardsSet = new Set(boards.map(b => boardsKey(b.channelId, b.messageId)));
 
@@ -72,6 +72,9 @@ const commands = [
   new SlashCommandBuilder().setName('mychars')
     .setDescription('내 계정의 모든 캐릭터 목록(즉시 조회)'),
 
+  new SlashCommandBuilder().setName('mychars-pin')
+    .setDescription('개인 캐릭터 목록 고정 및 자동 갱신'),
+
   new SlashCommandBuilder().setName('board-enable')
     .setDescription('현재 채널에 공용 보드 메시지를 생성/등록(자동 갱신 대상)'),
 
@@ -83,9 +86,6 @@ const commands = [
 
   new SlashCommandBuilder().setName('board-scan')
     .setDescription('길드의 모든 채널에서 보드 메시지를 자동 탐색/등록'),
-
-  new SlashCommandBuilder().setName('mychars-pin')
-    .setDescription('개인 캐릭터 목록 고정 및 자동 갱신'),
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
@@ -204,7 +204,7 @@ client.on('interactionCreate', async (i) => {
   if (i.commandName === 'board-enable') {
     await i.deferReply({ flags: EPHEMERAL });
     try {
-      const msg = await ensureBoardInChannel(i.channelId);
+      const msg = await ensureBoardInChannel(i.channelId); // 메시지 생성 또는 재사용
       addBoard(i.channelId, msg.id);
       await i.editReply('📌 이 채널의 보드를 자동 갱신 대상으로 등록했습니다.');
     } catch (e) {
@@ -257,17 +257,20 @@ async function ensureBoardInChannel(channelId) {
   if (!ch || ch.type !== ChannelType.GuildText) {
     throw new Error('이 명령은 일반 텍스트 채널에서만 사용할 수 있어요.');
   }
+  // 기존 등록된 것부터 찾기
   for (const b of boards) {
     if (b.channelId === channelId) {
       const existing = await ch.messages.fetch(b.messageId).catch(() => null);
       if (existing) return existing;
     }
   }
+  // 채널 최근 메시지에서 우리 마커가 있는 것을 우선 재사용
   const msgs = await ch.messages.fetch({ limit: SCAN_LIMIT_PER_CHANNEL }).catch(() => null);
   if (msgs) {
     const mine = [...msgs.values()].find(m => m.author?.id === client.user.id && hasBoardMarker(m));
     if (mine) return mine;
   }
+  // 새로 생성
   const embed = await buildBoardEmbed(true);
   const msg = await ch.send({ embeds: [embed] });
   return msg;
@@ -277,6 +280,7 @@ function hasBoardMarker(message) {
   const e = message.embeds?.[0];
   return Boolean(e?.footer?.text && e.footer.text.includes(BOARD_TAG));
 }
+
 function addBoard(channelId, messageId) {
   const key = boardsKey(channelId, messageId);
   if (boardsSet.has(key)) return;
@@ -284,6 +288,7 @@ function addBoard(channelId, messageId) {
   boardsSet.add(key);
   saveJSON(BOARDS_PATH, boards);
 }
+
 async function discoverBoards() {
   const guild = await client.guilds.fetch(process.env.GUILD_ID);
   const chans = await guild.channels.fetch();
@@ -302,6 +307,7 @@ async function discoverBoards() {
   console.log(`🔎 discoverBoards: ${found} boards found (managed total=${boards.length})`);
   return found;
 }
+
 async function refreshAllBoards(force = false) {
   console.log(`[REFRESH_ALL] count=${boards.length}`);
   for (const b of boards) {
@@ -311,7 +317,7 @@ async function refreshAllBoards(force = false) {
       if (!ch) { console.error('[EDIT FAIL] channel not found', b.channelId); continue; }
       const msg = await ch.messages.fetch(b.messageId).catch(() => null);
       if (!msg) { console.error('[EDIT FAIL] message not found', b.channelId, b.messageId); continue; }
-      const embed = await buildBoardEmbed(true);
+      const embed = await buildBoardEmbed(true); // 항상 강제 API 호출
       await msg.edit({ embeds: [embed] });
     } catch (e) {
       console.error('[EDIT FAIL]', b.channelId, b.messageId, e?.rawError ?? e);
@@ -361,11 +367,10 @@ async function buildBoardEmbed(force = false) {
   return new EmbedBuilder()
     .setTitle('서버 현황판 (등록자 기준)')
     .setDescription(description)
-    .setFooter({
-      text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR',{timeZone:'Asia/Seoul'})}`
-    })
+    .setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR',{ timeZone:'Asia/Seoul' })}` })
     .setColor(0xFFD700);
 }
+
 async function buildPersonalEmbed(userId, mainName) {
   const chars = await getSiblings(mainName, { force: true });
   const sorted = [...chars].sort((a,b) => toLevelNum(b.ItemAvgLevel) - toLevelNum(a.ItemAvgLevel));
@@ -376,8 +381,9 @@ async function buildPersonalEmbed(userId, mainName) {
     .setTitle(`**<@${userId}>**님의 캐릭터 목록`)
     .setDescription(lines.join('\n'))
     .setColor(0x00AE86)
-    .setFooter({ text: `${BOARD_TAG} 개인 • 마지막 갱신: ${new Date().toLocaleString('ko-KR',{timeZone:'Asia/Seoul'})}` });
+    .setFooter({ text: `${BOARD_TAG} 개인 • 마지막 갱신: ${new Date().toLocaleString('ko-KR',{ timeZone:'Asia/Seoul' })}` });
 }
+
 async function replyMyChars(i, mainName) {
   const embed = await buildPersonalEmbed(i.user.id, mainName);
   if (i.replied || i.deferred) {
@@ -400,13 +406,36 @@ function startAutoRefresh() {
       console.error('auto refresh error:', e);
     }
   };
-  tick();
+  tick(); // 즉시 1회
   refreshTimer = setInterval(tick, REFRESH_INTERVAL_MS);
   console.log('⏱️ 자동 갱신 시작');
 }
+
 async function refreshAllPersonalOnce() {
   const entries = Object.entries(links);
   for (const [userId, info] of entries) {
     const p = info?.personal;
     const main = info?.main;
-    if (!p?.channelId || !p?.
+    if (!p?.channelId || !p?.messageId || !main) continue;
+    await wait(EDIT_DELAY_MS);
+    try {
+      const ch = await client.channels.fetch(p.channelId).catch(() => null);
+      if (!ch) { console.error('[EDIT FAIL personal] channel not found', userId, p.channelId); continue; }
+      const msg = await ch.messages.fetch(p.messageId).catch(() => null);
+      if (!msg) { console.error('[EDIT FAIL personal] message not found', userId, p.channelId, p.messageId); continue; }
+      const embed = await buildPersonalEmbed(userId, main);
+      await msg.edit({ embeds: [embed] });
+      console.log('[EDIT OK personal]', userId, p.channelId, p.messageId);
+    } catch (e) {
+      console.error('[EDIT FAIL personal]', userId, e?.rawError ?? e);
+    }
+  }
+}
+
+// ===================== 유틸 =====================
+function wait(ms) { return new Promise(res => setTimeout(res, ms)); }
+
+// ===================== 로그인 =====================
+client.login(process.env.DISCORD_TOKEN);
+
+// ===================== 끝 =====================
