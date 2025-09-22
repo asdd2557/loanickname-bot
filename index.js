@@ -83,8 +83,8 @@ client.once('ready', async () => {
   if (process.env.BOARD_MESSAGE_ID) board.messageId = process.env.BOARD_MESSAGE_ID;
   saveJSON(BOARD_PATH, board);
 
-  // 부팅 시 자동 갱신 재개(설정 ON 이고 보드 위치를 알고 있으면)
-  if (board.enabled) startAutoRefresh();
+  // (중요) 자동 갱신은 항상 시작 — 메시지가 없으면 편집 스킵만 함(신규 생성 없음)
+  startAutoRefresh();
 });
 
 client.on('interactionCreate', async (i) => {
@@ -110,12 +110,12 @@ client.on('interactionCreate', async (i) => {
       // 3) 현황판 메시지 확보(없으면 1회 생성) — 최초 1개만 생성
       await ensureBoardMessage(i);
 
-      // 4) 자동 갱신 스타트(이미 동작 중이면 재시작)
+      // 4) 자동 갱신 플래그 저장(선택)
       if (!board.enabled) {
         board.enabled = true;
         saveJSON(BOARD_PATH, board);
       }
-      startAutoRefresh();
+      // 자동 갱신은 이미 켜져 있으므로 재호출 불필요
 
     } catch (e) {
       console.error('link error:', e?.response?.data || e);
@@ -168,10 +168,13 @@ client.on('interactionCreate', async (i) => {
   }
 });
 
-// ===================== 유틸: 개인 목록 임베드 응답 =====================
+// ===================== 유틸 =====================
+const toLevelNum = (s) => parseFloat(String(s).replace(/,/g, '') || '0');
+
+// 개인 목록 임베드 응답
 async function replyMyChars(i, mainName) {
   const chars = await getSiblings(mainName, { force: true });
-  const sorted = [...chars].sort((a, b) => parseFloat(b.ItemAvgLevel) - parseFloat(a.ItemAvgLevel));
+  const sorted = [...chars].sort((a, b) => toLevelNum(b.ItemAvgLevel) - toLevelNum(a.ItemAvgLevel));
   const displayName = i.member?.displayName || i.user.username;
 
   const embed = new EmbedBuilder()
@@ -179,7 +182,8 @@ async function replyMyChars(i, mainName) {
     .setDescription(sorted.map(c =>
       `• **${c.CharacterName}** (${c.CharacterClassName}) — ${c.ServerName} | 아이템 레벨 ${c.ItemAvgLevel}`
     ).join('\n'))
-    .setColor(0x00AE86);
+    .setColor(0x00AE86)
+    .setFooter({ text: `마지막 갱신: ${new Date().toLocaleString()} (주기: ${Math.floor(REFRESH_INTERVAL_MS/60000)}분)` });
 
   if (i.replied || i.deferred) {
     await i.editReply({ embeds: [embed] }).catch(async () => i.followUp({ embeds: [embed] }));
@@ -220,54 +224,82 @@ async function ensureBoardMessage(iOrNull) {
 }
 
 async function buildBoardEmbed(force = false) {
+  // 등록자가 없을 때
   if (!links || Object.keys(links).length === 0) {
     return new EmbedBuilder()
       .setTitle('서버 현황판')
       .setDescription('등록된 유저가 없습니다. `/link 캐릭터명`으로 등록하세요.')
-      .setColor(0x999999);
+      .setColor(0x999999)
+      .setFooter({ text: `마지막 갱신: ${new Date().toLocaleString()} (주기: ${Math.floor(REFRESH_INTERVAL_MS/60000)}분)` });
   }
 
-  const lines = [];
+  // 각 유저의 최고 레벨 캐릭터를 뽑아 모은 뒤, 레벨 내림차순 정렬
+  const rows = [];
   for (const [userId, main] of Object.entries(links)) {
     try {
       await wait(API_DELAY_PER_USER_MS);
       const chars = await getSiblings(main, { force });
       if (!chars?.length) {
-        lines.push(`<@${userId}> — ${main}: ❌ 조회 실패`);
+        rows.push({ userId, err: `${main}: ❌ 조회 실패` });
         continue;
       }
-      const best = chars.reduce((a, b) => parseFloat(a.ItemAvgLevel) > parseFloat(b.ItemAvgLevel) ? a : b);
-      lines.push(`• <@${userId}> — **${best.CharacterName}** (${best.CharacterClassName}) | ${best.ItemAvgLevel}`);
+      const best = chars.reduce((a, b) =>
+        toLevelNum(a.ItemAvgLevel) >= toLevelNum(b.ItemAvgLevel) ? a : b
+      );
+      rows.push({
+        userId,
+        name: best.CharacterName,
+        cls: best.CharacterClassName,
+        levelStr: best.ItemAvgLevel,
+        levelNum: toLevelNum(best.ItemAvgLevel)
+      });
     } catch {
-      lines.push(`• <@${userId}> — ${main}: ❌ 오류`);
+      rows.push({ userId, err: `${main}: ❌ 오류` });
     }
   }
+
+  // 정렬: 높은 레벨 먼저
+  rows.sort((a, b) => (b.levelNum || 0) - (a.levelNum || 0));
+
+  // 출력 라인 구성 (닉네임 굵게)
+  const lines = rows.map(r => {
+    if (r.err) return `• **<@${r.userId}>** — ${r.err}`;
+    return `• **<@${r.userId}>** — **${r.name}** (${r.cls}) | ${r.levelStr}`;
+  });
 
   return new EmbedBuilder()
     .setTitle('서버 현황판 (등록자 기준)')
     .setDescription(lines.join('\n'))
-    .setFooter({ text: `자동 갱신: ${Math.floor(REFRESH_INTERVAL_MS / 60000)}분마다` })
+    .setFooter({ text: `마지막 갱신: ${new Date().toLocaleString()} (주기: ${Math.floor(REFRESH_INTERVAL_MS/60000)}분)` })
     .setColor(0xFFD700);
 }
 
 async function refreshBoardOnce(force = false) {
   if (!board.channelId || !board.messageId) {
-    console.log('ℹ️ 보드 메시지가 없어 갱신 생략');
+    console.log('ℹ️ 보드 메시지가 없어 갱신 생략 (channelId/messageId 누락)');
     return;
   }
-  const channel = await client.channels.fetch(board.channelId).catch(() => null);
+  const channel = await client.channels.fetch(board.channelId).catch((e) => {
+    console.error('⚠️ 채널 fetch 실패:', e?.rawError ?? e);
+    return null;
+  });
   if (!channel) {
     console.log('⚠️ 채널을 찾지 못해 갱신 생략');
     return;
   }
-  const msg = await channel.messages.fetch(board.messageId).catch(() => null);
+  const msg = await channel.messages.fetch(board.messageId).catch((e) => {
+    console.error('⚠️ 메시지 fetch 실패:', e?.rawError ?? e);
+    return null;
+  });
   if (!msg) {
     console.log('⚠️ 보드 메시지를 찾을 수 없어 편집 생략(신규 생성 안 함)');
     return;
   }
 
   const embed = await buildBoardEmbed(force);
-  await msg.edit({ embeds: [embed] });
+  await msg.edit({ embeds: [embed] }).catch((e) => {
+    console.error('✖️ 메시지 편집 실패:', e?.rawError ?? e);
+  });
 }
 
 // ===================== 자동 갱신 타이머 =====================
@@ -276,6 +308,11 @@ function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
 
   const tick = async () => {
+    console.log('[TICK]', new Date().toISOString(), {
+      enabled: board.enabled,
+      channelId: board.channelId,
+      messageId: board.messageId
+    });
     try {
       // 자동 루프에서는 "절대 새 메시지 생성" 안 함 → 편집만 시도
       await refreshBoardOnce(true); // 주기 갱신 시에도 강제 API 호출
