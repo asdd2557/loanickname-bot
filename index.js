@@ -342,7 +342,8 @@ async function buildBoardEmbed(force = false) {
   return new EmbedBuilder()
     .setTitle('서버 현황판 (등록자 기준)')
     .setDescription(description)
-    .setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString()} (주기: ${Math.floor(REFRESH_INTERVAL_MS/60000)}분)` })
+   .setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}` })
+
     .setColor(0xFFD700);
 }
 
@@ -358,7 +359,8 @@ async function replyMyChars(i, mainName) {
       `• **${c.CharacterName}** (${c.CharacterClassName}) — ${c.ServerName} | 아이템 레벨 ${c.ItemAvgLevel}`
     ).join('\n'))
     .setColor(0x00AE86)
-    .setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString()}` });
+.setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}` })
+
 
   if (i.replied || i.deferred) {
     await i.editReply({ embeds: [embed] }).catch(async () => i.followUp({ embeds: [embed] }));
