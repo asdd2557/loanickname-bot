@@ -19,6 +19,12 @@ const PERSIST_DIR = '.';
 const EPHEMERAL = 1 << 6; // interaction flags (ephemeral)
 const BOARD_TAG = '[LOA_BOARD]';
 
+
+// 에러/종료 신호도 로깅
+process.on('unhandledRejection', (e) => console.error('UNHANDLED REJECTION', e));
+process.on('uncaughtException', (e) => console.error('UNCAUGHT EXCEPTION', e));
+process.on('SIGTERM', () => { console.log('SIGTERM'); process.exit(0); });
+
 // ===================== 저장 파일 =====================
 const LINKS_PATH = path.join(PERSIST_DIR, 'links.json');   // { userId: { main, personal? } }
 const BOARDS_PATH = path.join(PERSIST_DIR, 'boards.json'); // [{channelId, messageId}]
@@ -109,10 +115,7 @@ client.once('ready', async () => {
 
   startAutoRefresh();
 
-  const PORT = process.env.PORT || 8080;
-  http.createServer((_, res) => res.end('ok')).listen(PORT, () => {
-    console.log('🌐 HTTP keep-alive server listening on', PORT);
-  });
+
 });
 
 client.on('interactionCreate', async (i) => {
