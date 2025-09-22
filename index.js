@@ -10,8 +10,8 @@ import {
   ChannelType,
 } from 'discord.js';
 
-// ===================== 설정 =====================
-const REFRESH_INTERVAL_MS = 1 * 60 * 1000;   // 1분 (테스트용; 원하면 10분으로)
+// ===================== 기본 설정 =====================
+const REFRESH_INTERVAL_MS = 1 * 60 * 1000;   // 1분 (원하면 10분으로 변경)
 const API_DELAY_PER_USER_MS = 300;
 const EDIT_DELAY_MS = 500;
 const SCAN_LIMIT_PER_CHANNEL = 50;
@@ -19,24 +19,26 @@ const PERSIST_DIR = '.';
 const EPHEMERAL = 1 << 6; // interaction flags (ephemeral)
 const BOARD_TAG = '[LOA_BOARD]';
 
-
-// 에러/종료 신호도 로깅
+// ===================== HTTP keep-alive (부팅 즉시 시작) =====================
+const PORT = process.env.PORT || 8080;
+http.createServer((_, res) => res.end('ok')).listen(PORT, () => {
+  console.log('🌐 HTTP keep-alive server listening on', PORT);
+});
 process.on('unhandledRejection', (e) => console.error('UNHANDLED REJECTION', e));
 process.on('uncaughtException', (e) => console.error('UNCAUGHT EXCEPTION', e));
 process.on('SIGTERM', () => { console.log('SIGTERM'); process.exit(0); });
 
-// ===================== 저장 파일 =====================
-const LINKS_PATH = path.join(PERSIST_DIR, 'links.json');   // { userId: { main, personal? } }
-const BOARDS_PATH = path.join(PERSIST_DIR, 'boards.json'); // [{channelId, messageId}]
+// ===================== 저장 파일 경로 =====================
+const LINKS_PATH  = path.join(PERSIST_DIR, 'links.json');   // { userId: { main, personal? } }
+const BOARDS_PATH = path.join(PERSIST_DIR, 'boards.json');  // [{channelId, messageId}]
 
-// ===================== 로아 API =====================
+// ===================== Lost Ark API =====================
 const api = axios.create({
   baseURL: 'https://developer-lostark.game.onstove.com',
   headers: { Authorization: `Bearer ${process.env.LOSTARK_API_KEY}` }
 });
-
-const cache = new Map();
-const TTL_MS = 60 * 1000; // 디버그용 1분 (확인되면 5~10분 등으로 조절)
+const cache = new Map();              // url -> { data, ts }
+const TTL_MS = 60 * 1000;             // 디버그 1분 (운영은 5~10분 권장)
 
 async function cachedGet(url, { force = false } = {}) {
   const now = Date.now();
@@ -58,15 +60,15 @@ function loadJSON(file, fallback) {
 }
 function saveJSON(file, obj) {
   try { fs.writeFileSync(file, JSON.stringify(obj, null, 2), 'utf8'); }
-  catch { /* read-only 대비 */ }
+  catch { /* Railway read-only 대비 */ }
 }
 
-let links  = loadJSON(LINKS_PATH, {});  // { userId: { main, personal? } }
-let boards = loadJSON(BOARDS_PATH, []); // [{channelId, messageId}]
+let links  = loadJSON(LINKS_PATH,  {});
+let boards = loadJSON(BOARDS_PATH, []);
 const boardsKey = (c, m) => `${c}:${m}`;
 let boardsSet = new Set(boards.map(b => boardsKey(b.channelId, b.messageId)));
 
-// ===================== 커맨드 등록 =====================
+// ===================== 슬래시 커맨드 등록 =====================
 const commands = [
   new SlashCommandBuilder().setName('link')
     .setDescription('대표 캐릭터 등록(등록 후 즉시 목록 출력)')
@@ -108,20 +110,18 @@ client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
   try {
-    await discoverBoards();
+    await discoverBoards(); // 부팅 시 기존 보드 자동 등록
   } catch (e) {
     console.error('discoverBoards error:', e?.rawError ?? e);
   }
 
-  startAutoRefresh();
-
-
+  startAutoRefresh();       // 자동 갱신 루프 시작
 });
 
 client.on('interactionCreate', async (i) => {
   if (!i.isChatInputCommand()) return;
 
-  // ===== /link =====
+  // /link
   if (i.commandName === 'link') {
     const name = i.options.getString('name', true).trim();
     try {
@@ -145,7 +145,7 @@ client.on('interactionCreate', async (i) => {
     }
   }
 
-  // ===== /unlink =====
+  // /unlink
   if (i.commandName === 'unlink') {
     if (links[i.user.id]?.main) {
       const cur = links[i.user.id];
@@ -158,7 +158,7 @@ client.on('interactionCreate', async (i) => {
     }
   }
 
-  // ===== /mychars =====
+  // /mychars
   if (i.commandName === 'mychars') {
     const main = links[i.user.id]?.main;
     if (!main) return i.reply({ content: '먼저 `/link [캐릭터명]` 으로 연결해주세요.', flags: EPHEMERAL });
@@ -170,7 +170,7 @@ client.on('interactionCreate', async (i) => {
     }
   }
 
-  // ===== /mychars-pin =====
+  // /mychars-pin
   if (i.commandName === 'mychars-pin') {
     const me = links[i.user.id];
     if (!me?.main) {
@@ -203,7 +203,7 @@ client.on('interactionCreate', async (i) => {
     }
   }
 
-  // ===== /board-enable =====
+  // /board-enable
   if (i.commandName === 'board-enable') {
     await i.deferReply({ flags: EPHEMERAL });
     try {
@@ -216,7 +216,7 @@ client.on('interactionCreate', async (i) => {
     }
   }
 
-  // ===== /board-disable =====
+  // /board-disable
   if (i.commandName === 'board-disable') {
     const before = boards.length;
     boards = boards.filter(b => b.channelId !== i.channelId);
@@ -228,7 +228,7 @@ client.on('interactionCreate', async (i) => {
     });
   }
 
-  // ===== /board-refresh =====
+  // /board-refresh
   if (i.commandName === 'board-refresh') {
     await i.deferReply({ flags: EPHEMERAL });
     try {
@@ -241,7 +241,7 @@ client.on('interactionCreate', async (i) => {
     }
   }
 
-  // ===== /board-scan =====
+  // /board-scan
   if (i.commandName === 'board-scan') {
     await i.deferReply({ flags: EPHEMERAL });
     try {
@@ -254,20 +254,19 @@ client.on('interactionCreate', async (i) => {
   }
 });
 
-// ===================== 보드 관리 =====================
+// ===================== 보드/개인 메시지 관리 =====================
 async function ensureBoardInChannel(channelId) {
   const ch = await client.channels.fetch(channelId);
-  if (!ch || ch.type !== ChannelType.GuildText) {
-    throw new Error('이 명령은 일반 텍스트 채널에서만 사용할 수 있어요.');
-  }
-  // 기존 등록된 것부터 찾기
+  if (!ch || ch.type !== ChannelType.GuildText) throw new Error('이 명령은 일반 텍스트 채널에서만 사용할 수 있어요.');
+
+  // 기존 등록된 것부터 확인
   for (const b of boards) {
     if (b.channelId === channelId) {
       const existing = await ch.messages.fetch(b.messageId).catch(() => null);
       if (existing) return existing;
     }
   }
-  // 채널 최근 메시지에서 우리 마커가 있는 것을 우선 재사용
+  // 채널 최근 메시지 중 우리 마커가 있으면 재사용
   const msgs = await ch.messages.fetch({ limit: SCAN_LIMIT_PER_CHANNEL }).catch(() => null);
   if (msgs) {
     const mine = [...msgs.values()].find(m => m.author?.id === client.user.id && hasBoardMarker(m));
@@ -278,12 +277,10 @@ async function ensureBoardInChannel(channelId) {
   const msg = await ch.send({ embeds: [embed] });
   return msg;
 }
-
 function hasBoardMarker(message) {
   const e = message.embeds?.[0];
   return Boolean(e?.footer?.text && e.footer.text.includes(BOARD_TAG));
 }
-
 function addBoard(channelId, messageId) {
   const key = boardsKey(channelId, messageId);
   if (boardsSet.has(key)) return;
@@ -291,7 +288,6 @@ function addBoard(channelId, messageId) {
   boardsSet.add(key);
   saveJSON(BOARDS_PATH, boards);
 }
-
 async function discoverBoards() {
   const guild = await client.guilds.fetch(process.env.GUILD_ID);
   const chans = await guild.channels.fetch();
@@ -310,7 +306,6 @@ async function discoverBoards() {
   console.log(`🔎 discoverBoards: ${found} boards found (managed total=${boards.length})`);
   return found;
 }
-
 async function refreshAllBoards(force = false) {
   console.log(`[REFRESH_ALL] count=${boards.length}`);
   for (const b of boards) {
@@ -320,7 +315,7 @@ async function refreshAllBoards(force = false) {
       if (!ch) { console.error('[EDIT FAIL] channel not found', b.channelId); continue; }
       const msg = await ch.messages.fetch(b.messageId).catch(() => null);
       if (!msg) { console.error('[EDIT FAIL] message not found', b.channelId, b.messageId); continue; }
-      const embed = await buildBoardEmbed(true); // 항상 강제 API 호출
+      const embed = await buildBoardEmbed(true); // 강제 API 호출
       await msg.edit({ embeds: [embed] });
     } catch (e) {
       console.error('[EDIT FAIL]', b.channelId, b.messageId, e?.rawError ?? e);
@@ -342,10 +337,7 @@ async function buildBoardEmbed(force = false) {
       try {
         await wait(API_DELAY_PER_USER_MS);
         const chars = await getSiblings(main, { force: true });
-        if (!chars?.length) {
-          rows.push({ userId, err: `${main}: ❌ 조회 실패` });
-          continue;
-        }
+        if (!chars?.length) { rows.push({ userId, err: `${main}: ❌ 조회 실패` }); continue; }
         const best = chars.reduce((a, b) =>
           toLevelNum(a.ItemAvgLevel) >= toLevelNum(b.ItemAvgLevel) ? a : b
         );
@@ -361,19 +353,17 @@ async function buildBoardEmbed(force = false) {
       }
     }
     rows.sort((a, b) => (b.levelNum || 0) - (a.levelNum || 0));
-    description = rows.map(r => {
-      if (r.err) return `• **<@${r.userId}>** — ${r.err}`;
-      return `• **<@${r.userId}>** — **${r.name}** (${r.cls}) | ${r.levelStr}`;
-    }).join('\n');
+    description = rows.map(r => r.err
+      ? `• **<@${r.userId}>** — ${r.err}`
+      : `• **<@${r.userId}>** — **${r.name}** (${r.cls}) | ${r.levelStr}`
+    ).join('\n');
   }
-
   return new EmbedBuilder()
     .setTitle('서버 현황판 (등록자 기준)')
     .setDescription(description)
     .setFooter({ text: `${BOARD_TAG} 마지막 갱신: ${new Date().toLocaleString('ko-KR',{ timeZone:'Asia/Seoul' })}` })
     .setColor(0xFFD700);
 }
-
 async function buildPersonalEmbed(userId, mainName) {
   const chars = await getSiblings(mainName, { force: true });
   const sorted = [...chars].sort((a,b) => toLevelNum(b.ItemAvgLevel) - toLevelNum(a.ItemAvgLevel));
@@ -386,7 +376,6 @@ async function buildPersonalEmbed(userId, mainName) {
     .setColor(0x00AE86)
     .setFooter({ text: `${BOARD_TAG} 개인 • 마지막 갱신: ${new Date().toLocaleString('ko-KR',{ timeZone:'Asia/Seoul' })}` });
 }
-
 async function replyMyChars(i, mainName) {
   const embed = await buildPersonalEmbed(i.user.id, mainName);
   if (i.replied || i.deferred) {
@@ -396,7 +385,7 @@ async function replyMyChars(i, mainName) {
   }
 }
 
-// ===================== 자동 갱신 =====================
+// ===================== 자동 갱신 루프 =====================
 let refreshTimer = null;
 function startAutoRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
@@ -413,7 +402,6 @@ function startAutoRefresh() {
   refreshTimer = setInterval(tick, REFRESH_INTERVAL_MS);
   console.log('⏱️ 자동 갱신 시작');
 }
-
 async function refreshAllPersonalOnce() {
   const entries = Object.entries(links);
   for (const [userId, info] of entries) {
@@ -440,5 +428,3 @@ function wait(ms) { return new Promise(res => setTimeout(res, ms)); }
 
 // ===================== 로그인 =====================
 client.login(process.env.DISCORD_TOKEN);
-
-// ===================== 끝 =====================
