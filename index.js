@@ -238,7 +238,6 @@ async function ensureBoardInChannel(channelId) {
   }
   // 새로 생성
   const embed = await buildBoardEmbed(true);
-  console.log('[DATA]', main, 'best=', best.CharacterName, best.ItemAvgLevel);
   const msg = await ch.send({ embeds: [embed] });
   return msg;
 }
@@ -294,7 +293,6 @@ async function refreshAllBoards(force = false) {
       const msg = await ch.messages.fetch(b.messageId).catch(() => null);
       if (!msg) continue;
       const embed = await buildBoardEmbed(true);
-      console.log('[DATA]', main, 'best=', best.CharacterName, best.ItemAvgLevel);
       await msg.edit({ embeds: [embed] }).catch(()=>{});
     } catch (e) {
       console.error('board edit error:', b.channelId, b.messageId, e?.rawError ?? e);
