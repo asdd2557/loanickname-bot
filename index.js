@@ -19,7 +19,7 @@ import { Agent as HttpAgent } from 'http';
 import { Agent as HttpsAgent } from 'https';
 
 // ===================== 기본 설정 =====================
-const REFRESH_INTERVAL_MS    = 10 * 60 * 1000; // 10분
+const REFRESH_INTERVAL_MS    = 10 * 60 * 100; // 10분
 const API_DELAY_PER_USER_MS  = 300;            // Lost Ark API 호출 사이 지연
 const EDIT_DELAY_MS          = 500;            // 메시지 편집 사이 지연
 const SCAN_LIMIT_PER_CHANNEL = 50;             // 채널당 최근 N개 메시지 탐색
