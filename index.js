@@ -19,12 +19,12 @@ import { Agent as HttpAgent } from 'http';
 import { Agent as HttpsAgent } from 'https';
 
 // ===================== 기본 설정 =====================
-const REFRESH_INTERVAL_MS    = 10 * 60 * 100; // 10분
-const API_DELAY_PER_USER_MS  = 300;            // Lost Ark API 호출 사이 지연
-const EDIT_DELAY_MS          = 500;            // 메시지 편집 사이 지연
-const SCAN_LIMIT_PER_CHANNEL = 50;             // 채널당 최근 N개 메시지 탐색
+const REFRESH_INTERVAL_MS    = 1 * 60 * 1000; // 🔁 1분마다 자동 갱신
+const API_DELAY_PER_USER_MS  = 300;           // Lost Ark API 호출 사이 지연
+const EDIT_DELAY_MS          = 500;           // 메시지 편집 사이 지연
+const SCAN_LIMIT_PER_CHANNEL = 50;            // 채널당 최근 N개 메시지 탐색
 const PERSIST_DIR = '.';
-const EPHEMERAL   = 1 << 6;                    // interaction flags
+const EPHEMERAL   = 1 << 6;                   // interaction flags
 const BOARD_TAG   = '[LOA_BOARD]';
 
 // ===================== HTTP keep-alive =====================
@@ -52,7 +52,7 @@ const api = axios.create({
 });
 
 const cache = new Map();           // url -> { data, ts }
-const TTL_MS = 60 * 1000;          // 1분 (운영에서는 5~10분 권장)
+const TTL_MS = 60 * 1000;          // 1분 캐시 (원하면 늘려도 됨)
 
 async function cachedGet(url, { force = false } = {}) {
   const now = Date.now();
@@ -96,7 +96,7 @@ function formatArkPassive(ark, { maxPoints = 3 } = {}) {
   if (!points.length) return '등록된 아크 패시브가 없습니다.';
 
   const lines = ['**포인트**'];
-  points.slice(0, maxPoints).forEach(p => {
+  points.slice(0, maxPoints).forEach((p) => {
     const desc  = stripTags(p.Description || '');
     const value = p.Value != null ? ` (${p.Value} 포인트)` : '';
     lines.push(`• ${p.Name}${value}${desc ? ` - ${desc}` : ''}`);
@@ -118,7 +118,7 @@ function saveJSON(file, obj) {
 let links  = loadJSON(LINKS_PATH,  {});  // { userId: { main, personal? } }
 let boards = loadJSON(BOARDS_PATH, []);  // [{channelId, messageId}]
 const boardsKey = (c, m) => `${c}:${m}`;
-let boardsSet = new Set(boards.map(b => boardsKey(b.channelId, b.messageId)));
+let boardsSet = new Set(boards.map((b) => boardsKey(b.channelId, b.messageId)));
 
 // ===================== Discord 클라이언트 =====================
 const client = new Client({
@@ -133,14 +133,14 @@ const toLevelNum = (s) => parseFloat(String(s).replace(/,/g, '') || '0');
 const slashCommands = [
   new SlashCommandBuilder().setName('link')
     .setDescription('대표 캐릭터 등록(등록 후 즉시 목록 출력)')
-    .addStringOption(o => o.setName('name').setDescription('대표 캐릭터명').setRequired(true)),
+    .addStringOption((o) => o.setName('name').setDescription('대표 캐릭터명').setRequired(true)),
 
   new SlashCommandBuilder().setName('unlink')
     .setDescription('대표 캐릭터 연결 해제'),
 
   new SlashCommandBuilder().setName('mychars')
     .setDescription('내 계정의 모든 캐릭터 목록(즉시 조회)')
-    .addBooleanOption(o => o.setName('public').setDescription('채널에 모두 보이게 표시')),
+    .addBooleanOption((o) => o.setName('public').setDescription('채널에 모두 보이게 표시')),
 
   new SlashCommandBuilder().setName('mychars-pin')
     .setDescription('개인 캐릭터 목록 고정(공개) 및 자동 갱신'),
@@ -162,7 +162,7 @@ async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   await rest.put(
     Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
-    { body: slashCommands.map(c => c.toJSON()) },
+    { body: slashCommands.map((c) => c.toJSON()) },
   );
   console.log('🪄 Slash commands registered');
 }
@@ -264,7 +264,7 @@ client.on('interactionCreate', async (i) => {
       const main = ownerLink?.main || selectedName;
       const view = await buildPersonalView(ownerId, main, i.channelId);
 
-      // 메인 목록(텍스트+이미지) + 상세 임베드
+      // 메인 목록 + 상세 임베드 같이 표시
       await i.update({
         embeds: [...view.embeds, detailEmbed],
         components: view.components,
@@ -375,8 +375,8 @@ client.on('interactionCreate', async (i) => {
   // /board-disable
   if (i.commandName === 'board-disable') {
     const before = boards.length;
-    boards = boards.filter(b => b.channelId !== i.channelId);
-    boardsSet = new Set(boards.map(b => boardsKey(b.channelId, b.messageId)));
+    boards = boards.filter((b) => b.channelId !== i.channelId);
+    boardsSet = new Set(boards.map((b) => boardsKey(b.channelId, b.messageId)));
     saveJSON(BOARDS_PATH, boards);
     await i.reply({
       content:
@@ -502,7 +502,7 @@ async function refreshAllBoards() {
   }
 }
 
-// ===================== 임베드 빌더 =====================
+// ===================== 공용 보드 임베드 =====================
 async function buildBoardEmbed() {
   const ids = Object.keys(links);
   let description = '';
@@ -554,7 +554,7 @@ async function buildBoardEmbed() {
     .setColor(0xffd700);
 }
 
-// ===== 개인 임베드 + 드롭다운 뷰 =====
+// ===== 개인 임베드 + 드롭다운 뷰 (한 카드 + 아래 큰 이미지) =====
 async function buildPersonalView(userId, mainName, channelId) {
   // 1) 형제 캐릭터 목록
   const chars = await getSiblings(mainName, { force: true });
@@ -603,8 +603,8 @@ async function buildPersonalView(userId, mainName, channelId) {
 
   const displayName = await getDisplayName(userId, channelId);
 
-  // 4) 메인 Embed (텍스트 전용)
-  const textEmbed = new EmbedBuilder()
+  // 4) 한 개의 embed에 텍스트 + 아래 큰 이미지
+  const embed = new EmbedBuilder()
     .setTitle(`**${displayName}**님의 캐릭터 목록`)
     .setDescription(lines.join('\n'))
     .setColor(0x00ae86)
@@ -618,17 +618,11 @@ async function buildPersonalView(userId, mainName, channelId) {
       { name: '🌌 아크 패시브 (메인캐릭)', value: arkPassiveText,  inline: false },
     );
 
-  // 5) 오른쪽 큰 이미지처럼 보이게 할 embed
-  let imageEmbed = null;
   if (charImageUrl) {
-    imageEmbed = new EmbedBuilder()
-      .setImage(charImageUrl)
-      .setColor(0x000000);
+    embed.setImage(charImageUrl); // 👈 아래쪽 크게
   }
 
-  const embeds = imageEmbed ? [textEmbed, imageEmbed] : [textEmbed];
-
-  // 6) 드롭다운(캐릭 선택)
+  // 5) 드롭다운(캐릭 선택)
   const select = new StringSelectMenuBuilder()
     .setCustomId(`char-detail:${userId}`)
     .setPlaceholder('자세히 볼 캐릭터 선택')
@@ -642,7 +636,7 @@ async function buildPersonalView(userId, mainName, channelId) {
 
   const row = new ActionRowBuilder().addComponents(select);
 
-  return { embeds, components: [row] };
+  return { embeds: [embed], components: [row] };
 }
 
 // /mychars 응답
@@ -699,7 +693,7 @@ function startAutoRefresh() {
   };
   tick(); // 즉시 1회
   refreshTimer = setInterval(tick, REFRESH_INTERVAL_MS);
-  console.log('⏱️ 자동 갱신 시작');
+  console.log('⏱️ 자동 갱신 시작 (1분 간격)');
 }
 
 async function refreshAllPersonalOnce() {
