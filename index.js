@@ -19,7 +19,7 @@ import { Agent as HttpAgent } from 'http';
 import { Agent as HttpsAgent } from 'https';
 
 // ===================== 기본 설정 =====================
-const REFRESH_INTERVAL_MS    = 1 * 60 * 10000; // 🔁 1분마다 자동 갱신
+const REFRESH_INTERVAL_MS    = 1 * 60 * 1000; // 🔁 1분마다 자동 갱신
 const API_DELAY_PER_USER_MS  = 300;           // Lost Ark API 호출 사이 지연
 const EDIT_DELAY_MS          = 500;           // 메시지 편집 사이 지연
 const SCAN_LIMIT_PER_CHANNEL = 50;            // 채널당 최근 N개 메시지 탐색
@@ -39,7 +39,7 @@ process.on('uncaughtException', (e) => console.error('UNCAUGHT EXCEPTION', e));
 process.on('SIGTERM', () => { console.log('SIGTERM'); process.exit(0); });
 
 // ===================== 저장 파일 경로 =====================
-const LINKS_PATH  = path.join(PERSIST_DIR, 'links.json');   // { userId: { main, personal? } }
+const LINKS_PATH  = path.join(PERSIST_DIR, 'links.json');   // { userId: { main, personals?: [..] } }
 const BOARDS_PATH = path.join(PERSIST_DIR, 'boards.json');  // [{channelId, messageId}]
 
 // ===================== Lost Ark API =====================
@@ -52,7 +52,7 @@ const api = axios.create({
 });
 
 const cache = new Map();           // url -> { data, ts }
-const TTL_MS = 60 * 1000;          // 1분 캐시 (원하면 늘려도 됨)
+const TTL_MS = 60 * 1000;          // 1분 캐시
 
 async function cachedGet(url, { force = false } = {}) {
   const now = Date.now();
@@ -83,8 +83,8 @@ async function getArkPassive(name, opts) {
 // ===================== 아크 패시브 헬퍼 =====================
 function stripTags(html = '') {
   return String(html)
-    .replace(/<[^>]+>/g, ' ')  // 태그 제거
-    .replace(/\s+/g, ' ')      // 공백 정리
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
@@ -115,7 +115,7 @@ function saveJSON(file, obj) {
   catch { /* Railway read-only 대비 */ }
 }
 
-let links  = loadJSON(LINKS_PATH,  {});  // { userId: { main, personal? } }
+let links  = loadJSON(LINKS_PATH,  {});  // { userId: { main, personals? } }
 let boards = loadJSON(BOARDS_PATH, []);  // [{channelId, messageId}]
 const boardsKey = (c, m) => `${c}:${m}`;
 let boardsSet = new Set(boards.map((b) => boardsKey(b.channelId, b.messageId)));
@@ -208,6 +208,11 @@ client.on('interactionCreate', async (i) => {
     const ownerId = i.customId.split(':')[1];
     const selectedName = i.values[0];
 
+    // 본인만 상세 보기 (원하면 이 if 제거해도 됨)
+    if (i.user.id !== ownerId) {
+      return i.reply({ content: '이 메뉴는 해당 유저만 사용할 수 있습니다.', ephemeral: true });
+    }
+
     try {
       const profile = await getProfile(selectedName, { force: true });
       const ark     = await getArkPassive(selectedName, { force: true });
@@ -254,12 +259,11 @@ client.on('interactionCreate', async (i) => {
         detailEmbed.setImage(img);
       }
 
-      // 선택한 유저의 메인 뷰 다시 생성
+      // 선택한 유저의 메인 뷰 다시 생성 (현재 대표 main 기준)
       const ownerLink = links[ownerId];
       const main = ownerLink?.main || selectedName;
       const view = await buildPersonalView(ownerId, main, i.channelId);
 
-      // 메인 목록 + 상세 임베드 같이 표시
       await i.update({
         embeds: [...view.embeds, detailEmbed],
         components: view.components,
@@ -282,8 +286,20 @@ client.on('interactionCreate', async (i) => {
       if (!Array.isArray(sib) || sib.length === 0) {
         return i.reply({ content: `❌ **${name}** 캐릭터를 찾지 못했어요.`, flags: EPHEMERAL });
       }
+
       const cur = links[i.user.id] || {};
-      links[i.user.id] = { ...cur, main: name };
+      // main 을 항상 "마지막으로 link한 캐릭" 으로 유지
+      const me = {
+        ...cur,
+        main: name,
+        personals: Array.isArray(cur.personals) ? cur.personals : [],
+      };
+      // 예전 single personal 필드가 있다면 한 번만 array로 옮기기
+      if (cur.personal && !me.personals.length) {
+        me.personals.push({ ...cur.personal, main: cur.main || name });
+        delete me.personal;
+      }
+      links[i.user.id] = me;
       saveJSON(LINKS_PATH, links);
 
       // 1) 본인 미리보기(에페메랄)
@@ -309,7 +325,7 @@ client.on('interactionCreate', async (i) => {
     }
   }
 
-  // /unlink
+  // /unlink (여전히 "대표 main" 하나만 해제)
   if (i.commandName === 'unlink') {
     if (links[i.user.id]?.main) {
       const cur = links[i.user.id];
@@ -337,7 +353,7 @@ client.on('interactionCreate', async (i) => {
     }
   }
 
-  // /mychars-pin
+  // /mychars-pin  → 현재 main 기준으로 "그 main 전용" 고정 생성/갱신
   if (i.commandName === 'mychars-pin') {
     const me = links[i.user.id];
     if (!me?.main) {
@@ -549,7 +565,7 @@ async function buildBoardEmbed() {
     .setColor(0xffd700);
 }
 
-// ===== 개인 임베드 + 드롭다운 뷰 (한 카드 + 아래 큰 이미지) =====
+// ===== 개인 임베드 + 드롭다운 뷰 (메인 카드에는 이미지 X) =====
 async function buildPersonalView(userId, mainName, channelId) {
   // 1) 형제 캐릭터 목록
   const chars = await getSiblings(mainName, { force: true });
@@ -561,9 +577,8 @@ async function buildPersonalView(userId, mainName, channelId) {
 
   const mainChar = sorted[0];
 
-  // 2) 메인캐릭 프로필 (전투력 + 이미지)
+  // 2) 메인캐릭 프로필 (전투력; 이미지는 메인 카드에서 사용 X)
   let combatPowerText = '정보 없음';
-  let charImageUrl = null;
 
   try {
     const profile = await getProfile(mainChar.CharacterName, { force: true });
@@ -575,9 +590,6 @@ async function buildPersonalView(userId, mainName, channelId) {
       combatPowerText = Number.isFinite(cpNum)
         ? cpNum.toLocaleString('ko-KR')
         : String(p.CombatPower);
-    }
-    if (p?.CharacterImage) {
-      charImageUrl = p.CharacterImage;
     }
   } catch (e) {
     console.error('getProfile error:', e?.response?.data || e);
@@ -598,7 +610,7 @@ async function buildPersonalView(userId, mainName, channelId) {
 
   const displayName = await getDisplayName(userId, channelId);
 
-  // 4) 한 개의 embed에 텍스트 + 아래 큰 이미지
+  // 4) 한 개의 embed에 텍스트만 (이미지 없음)
   const embed = new EmbedBuilder()
     .setTitle(`**${displayName}**님의 캐릭터 목록`)
     .setDescription(lines.join('\n'))
@@ -612,7 +624,6 @@ async function buildPersonalView(userId, mainName, channelId) {
       { name: '⚔ 전투력 (메인캐릭)',      value: combatPowerText, inline: true },
       { name: '🌌 아크 패시브 (메인캐릭)', value: arkPassiveText,  inline: false },
     );
-
 
   // 5) 드롭다운(캐릭 선택)
   const select = new StringSelectMenuBuilder()
@@ -645,26 +656,46 @@ async function replyMyChars(i, mainName, isPublic = false) {
 }
 
 // 개인 고정 메시지(공개) 생성/업데이트 + 위치 저장
+// 👉 userId + mainName + channelId 조합마다 "별도의" 고정 메시지 관리
 async function ensurePersonalPinnedInChannel(channelId, userId, mainName) {
   const ch = await client.channels.fetch(channelId);
+
+  const cur = links[userId] || {};
+  let personals = Array.isArray(cur.personals) ? cur.personals : [];
+
+  // 예전 single personal 필드가 있으면 1회 마이그레이션
+  if (cur.personal && !personals.length) {
+    personals.push({ ...cur.personal, main: cur.main || mainName });
+  }
+
+  // 해당 main + 채널 조합의 기존 레코드 찾기
+  let record = personals.find((p) => p.channelId === channelId && p.main === mainName);
   let existing = null;
-  const me = links[userId] || {};
-  const old = me.personal;
-  if (old?.channelId && old?.messageId) {
-    const och = await client.channels.fetch(old.channelId).catch(() => null);
-    existing = och ? await och.messages.fetch(old.messageId).catch(() => null) : null;
+  if (record) {
+    const och = await client.channels.fetch(record.channelId).catch(() => null);
+    existing = och ? await och.messages.fetch(record.messageId).catch(() => null) : null;
   }
 
   const view = await buildPersonalView(userId, mainName, channelId);
 
   if (!existing) {
-    const msg = await ch.send({ embeds: view.embeds, components: view.components }); // 공개
-    links[userId] = { ...me, personal: { channelId: ch.id, messageId: msg.id } };
+    // 새 메시지 생성
+    const msg = await ch.send({ embeds: view.embeds, components: view.components });
+    const newRec = { main: mainName, channelId: ch.id, messageId: msg.id };
+    personals.push(newRec);
+
+    links[userId] = { ...cur, main: cur.main || mainName, personals };
+    delete links[userId].personal; // 예전 필드 정리
     saveJSON(LINKS_PATH, links);
     return 'created';
   } else {
+    // 기존 메시지 갱신
     await existing.edit({ embeds: view.embeds, components: view.components });
-    links[userId] = { ...me, personal: { channelId: ch.id, messageId: existing.id } };
+    record.channelId = ch.id;
+    record.messageId = existing.id;
+
+    links[userId] = { ...cur, personals };
+    delete links[userId].personal;
     saveJSON(LINKS_PATH, links);
     return 'updated';
   }
@@ -691,31 +722,39 @@ function startAutoRefresh() {
 async function refreshAllPersonalOnce() {
   const entries = Object.entries(links);
   for (const [userId, info] of entries) {
-    const p = info?.personal;
-    const main = info?.main;
-    if (!p?.channelId || !p?.messageId || !main) continue;
-    await wait(EDIT_DELAY_MS);
-    try {
-      const ch = await client.channels.fetch(p.channelId).catch(() => null);
-      if (!ch) {
-        console.error('[EDIT FAIL personal] channel not found', userId, p.channelId);
-        continue;
+    let personals = Array.isArray(info?.personals) ? info.personals : [];
+
+    // 예전 single personal → array 마이그레이션
+    if (info?.personal && !personals.length) {
+      personals = [{ ...info.personal, main: info.main }];
+    }
+
+    for (const p of personals) {
+      const main = p.main || info.main;
+      if (!p.channelId || !p.messageId || !main) continue;
+      await wait(EDIT_DELAY_MS);
+      try {
+        const ch = await client.channels.fetch(p.channelId).catch(() => null);
+        if (!ch) {
+          console.error('[EDIT FAIL personal] channel not found', userId, p.channelId);
+          continue;
+        }
+        const msg = await ch.messages.fetch(p.messageId).catch(() => null);
+        if (!msg) {
+          console.error(
+            '[EDIT FAIL personal] message not found',
+            userId,
+            p.channelId,
+            p.messageId,
+          );
+          continue;
+        }
+        const view = await buildPersonalView(userId, main, p.channelId);
+        await msg.edit({ embeds: view.embeds, components: view.components });
+        console.log('[EDIT OK personal]', userId, p.channelId, p.messageId, `main=${main}`);
+      } catch (e) {
+        console.error('[EDIT FAIL personal]', userId, e?.rawError ?? e);
       }
-      const msg = await ch.messages.fetch(p.messageId).catch(() => null);
-      if (!msg) {
-        console.error(
-          '[EDIT FAIL personal] message not found',
-          userId,
-          p.channelId,
-          p.messageId,
-        );
-        continue;
-      }
-      const view = await buildPersonalView(userId, main, p.channelId);
-      await msg.edit({ embeds: view.embeds, components: view.components });
-      console.log('[EDIT OK personal]', userId, p.channelId, p.messageId);
-    } catch (e) {
-      console.error('[EDIT FAIL personal]', userId, e?.rawError ?? e);
     }
   }
 }
