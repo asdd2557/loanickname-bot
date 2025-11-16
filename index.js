@@ -618,9 +618,6 @@ async function buildPersonalView(userId, mainName, channelId) {
       { name: '🌌 아크 패시브 (메인캐릭)', value: arkPassiveText,  inline: false },
     );
 
-  if (charImageUrl) {
-    embed.setImage(charImageUrl); // 👈 아래쪽 크게
-  }
 
   // 5) 드롭다운(캐릭 선택)
   const select = new StringSelectMenuBuilder()
