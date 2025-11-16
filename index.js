@@ -216,10 +216,15 @@ client.on('interactionCreate', async (i) => {
         console.log('[ArkPassive raw detail]', JSON.stringify(ark)); // 디버그용
 
         let list = [];
+
         if (Array.isArray(ark?.ArkPassivePoints)) {
           list = ark.ArkPassivePoints;
         } else if (Array.isArray(ark?.ArkPassivePoint)) {
           list = ark.ArkPassivePoint;
+        } else if (ark?.ArkPassivePoints) {
+          list = [ark.ArkPassivePoints];
+        } else if (ark?.ArkPassivePoint) {
+          list = [ark.ArkPassivePoint];
         } else if (Array.isArray(ark)) {
           list = ark;
         }
@@ -232,6 +237,11 @@ client.on('interactionCreate', async (i) => {
               return level != null ? `${name} (Lv.${level})` : name;
             })
             .join('\n');
+        } else {
+          // 그래도 파싱 안 되면 raw 일부라도 보여주기
+          arkPassiveText = '데이터 파싱 실패\n```json\n'
+            + JSON.stringify(ark, null, 2).slice(0, 400)
+            + '\n```';
         }
       } catch (e2) {
         console.error('ark passive detail error:', e2?.response?.data || e2);
@@ -241,13 +251,16 @@ client.on('interactionCreate', async (i) => {
         .setTitle(`🔍 ${selectedName} 상세 정보`)
         .setDescription(`${server} 서버 • ${cls}`)
         .addFields(
-          { name: '아이템 레벨', value: String(itemLevel), inline: true },
-          { name: '전투력',      value: combatPowerText,   inline: true },
+          { name: '아이템 레벨', value: String(itemLevel),   inline: true },
+          { name: '전투력',      value: combatPowerText,     inline: true },
           { name: '아크 패시브', value: arkPassiveText || '정보 없음' },
         )
         .setColor(0x3498db);
 
-      if (img) detailEmbed.setThumbnail(img);
+      if (img) {
+        // 상세 보기에서는 사진 크게
+        detailEmbed.setImage(img);
+      }
 
       // 선택한 유저의 메인 뷰 다시 생성해서, 같은 메시지 안에 목록 + 상세 같이 표시
       const ownerLink = links[ownerId];
@@ -599,6 +612,10 @@ async function buildPersonalView(userId, mainName, channelId) {
       list = ark.ArkPassivePoints;
     } else if (Array.isArray(ark?.ArkPassivePoint)) {
       list = ark.ArkPassivePoint;
+    } else if (ark?.ArkPassivePoints) {
+      list = [ark.ArkPassivePoints];
+    } else if (ark?.ArkPassivePoint) {
+      list = [ark.ArkPassivePoint];
     } else if (Array.isArray(ark)) {
       list = ark;
     }
@@ -612,6 +629,10 @@ async function buildPersonalView(userId, mainName, channelId) {
         })
         .slice(0, 5)
         .join('\n');
+    } else {
+      arkPassiveText = '데이터 파싱 실패\n```json\n'
+        + JSON.stringify(ark, null, 2).slice(0, 400)
+        + '\n```';
     }
   } catch (e) {
     console.error('getArkPassive error:', e?.response?.data || e);
@@ -632,12 +653,13 @@ async function buildPersonalView(userId, mainName, channelId) {
     });
 
   if (charImageUrl) {
-    embed.setThumbnail(charImageUrl);
+    // 목록 카드에서도 사진 크게
+    embed.setImage(charImageUrl);
   }
 
   embed.addFields(
     { name: '⚔ 전투력 (메인캐릭)', value: combatPowerText, inline: true },
-    { name: '🌌 아크 패시브 (메인캐릭)', value: arkPassiveText, inline: true },
+    { name: '🌌 아크 패시브 (메인캐릭)', value: arkPassiveText, inline: false },
   );
 
   // 5) 드롭다운(캐릭 선택)
