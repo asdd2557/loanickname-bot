@@ -88,34 +88,20 @@ function stripTags(html = '') {
     .trim();
 }
 
-// ark 응답(JSON)을 보기 좋은 텍스트로 변환
-function formatArkPassive(ark, { maxPoints = 3, maxEffects = 3 } = {}) {
+// ark 응답(JSON) → "포인트"만 텍스트로 변환 (효과는 표시 안 함)
+function formatArkPassive(ark, { maxPoints = 3 } = {}) {
   if (!ark) return '등록된 아크 패시브가 없습니다.';
 
-  const points  = Array.isArray(ark.Points)  ? ark.Points  : [];
-  const effects = Array.isArray(ark.Effects) ? ark.Effects : [];
+  const points = Array.isArray(ark.Points) ? ark.Points : [];
+  if (!points.length) return '등록된 아크 패시브가 없습니다.';
 
-  const lines = [];
+  const lines = ['**포인트**'];
+  points.slice(0, maxPoints).forEach(p => {
+    const desc  = stripTags(p.Description || '');
+    const value = p.Value != null ? ` (${p.Value} 포인트)` : '';
+    lines.push(`• ${p.Name}${value}${desc ? ` - ${desc}` : ''}`);
+  });
 
-  if (points.length) {
-    lines.push('**포인트**');
-    points.slice(0, maxPoints).forEach(p => {
-      const desc  = stripTags(p.Description || '');
-      const value = p.Value != null ? ` (${p.Value} 포인트)` : '';
-      lines.push(`• ${p.Name}${value}${desc ? ` - ${desc}` : ''}`);
-    });
-  }
-
-  if (effects.length) {
-    lines.push('', '**효과**');
-    effects.slice(0, maxEffects).forEach(e => {
-      const name = stripTags(e.Name || '');
-      const desc = stripTags(e.Description || '');
-      lines.push(`• ${name}${desc ? ` - ${desc}` : ''}`);
-    });
-  }
-
-  if (!lines.length) return '등록된 아크 패시브가 없습니다.';
   return lines.join('\n');
 }
 
@@ -222,7 +208,7 @@ client.on('interactionCreate', async (i) => {
     const ownerId = i.customId.split(':')[1];
     const selectedName = i.values[0];
 
-    // 본인만 상세 보기 가능 (필요 없으면 이 if 삭제해도 됨)
+    // 본인만 상세 보기 (원하면 이 if 제거해도 됨)
     if (i.user.id !== ownerId) {
       return i.reply({ content: '이 메뉴는 해당 유저만 사용할 수 있습니다.', ephemeral: true });
     }
@@ -249,11 +235,11 @@ client.on('interactionCreate', async (i) => {
       const server = p?.ServerName || '서버 정보 없음';
       const img    = p?.CharacterImage || null;
 
-      // 아크 패시브 디테일
+      // 아크 패시브 (포인트만)
       let arkPassiveText = '등록된 아크 패시브가 없습니다.';
       try {
         console.log('[ArkPassive raw detail]', JSON.stringify(ark));
-        arkPassiveText = formatArkPassive(ark, { maxPoints: 5, maxEffects: 5 });
+        arkPassiveText = formatArkPassive(ark, { maxPoints: 5 });
       } catch (e2) {
         console.error('ark passive detail error:', e2?.response?.data || e2);
       }
@@ -269,8 +255,8 @@ client.on('interactionCreate', async (i) => {
         .setColor(0x3498db);
 
       if (img) {
-        // 상세 보기에서는 크게 (카드 폭 전체)
-        detailEmbed.setImage(img);
+        // 상세 보기에서도 오른쪽 썸네일로
+        detailEmbed.setThumbnail(img);
       }
 
       // 선택한 유저의 메인 뷰 다시 생성해서, 같은 메시지 안에 목록 + 상세 같이 표시
@@ -312,7 +298,6 @@ client.on('interactionCreate', async (i) => {
         await ensurePersonalPinnedInChannel(i.channelId, i.user.id, name);
       } catch (e2) {
         console.error('auto pin after link error:', e2?.rawError ?? e2);
-        // 진짜 에러일 때만 안내 메시지
         await i.followUp({
           content: '⚠️ 개인 고정 메시지 생성/갱신 실패. `/mychars-pin`을 직접 실행해 주세요.',
           flags: EPHEMERAL,
@@ -365,7 +350,7 @@ client.on('interactionCreate', async (i) => {
     await i.deferReply({ flags: EPHEMERAL });
     try {
       await ensurePersonalPinnedInChannel(i.channelId, i.user.id, me.main);
-      // ✅ 성공 시에는 에페메랄 메시지 바로 삭제 (알림 안 보이게)
+      // 성공 시 에페메랄 메시지 삭제 → 알림 안 보이게
       await i.deleteReply();
     } catch (e) {
       console.error('mychars-pin error:', e?.rawError ?? e);
@@ -603,13 +588,13 @@ async function buildPersonalView(userId, mainName, channelId) {
     combatPowerText = '정보 없음';
   }
 
-  // 3) 메인캐릭 아크 패시브 요약
+  // 3) 메인캐릭 아크 패시브 (포인트만)
   let arkPassiveText = '등록된 아크 패시브가 없습니다.';
 
   try {
     const ark = await getArkPassive(mainChar.CharacterName, { force: true });
     console.log('[ArkPassive raw personal]', JSON.stringify(ark));
-    arkPassiveText = formatArkPassive(ark, { maxPoints: 3, maxEffects: 3 });
+    arkPassiveText = formatArkPassive(ark, { maxPoints: 3 });
   } catch (e) {
     console.error('getArkPassive error:', e?.response?.data || e);
     arkPassiveText = '정보 없음';
@@ -629,13 +614,13 @@ async function buildPersonalView(userId, mainName, channelId) {
     });
 
   if (charImageUrl) {
-    // ✅ 메인 카드에서는 오른쪽 썸네일 (글씨 오른쪽)
+    // 메인 카드에서도 오른쪽 썸네일
     embed.setThumbnail(charImageUrl);
   }
 
   embed.addFields(
-    { name: '⚔ 전투력 (메인캐릭)',  value: combatPowerText, inline: true },
-    { name: '🌌 아크 패시브 (메인캐릭)', value: arkPassiveText, inline: false },
+    { name: '⚔ 전투력 (메인캐릭)',      value: combatPowerText, inline: true },
+    { name: '🌌 아크 패시브 (메인캐릭)', value: arkPassiveText,  inline: false },
   );
 
   // 5) 드롭다운(캐릭 선택)
