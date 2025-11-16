@@ -195,9 +195,12 @@ client.on('interactionCreate', async (i) => {
       const p = profile?.ArmoryProfile || profile;
 
       const itemLevel = p?.ItemAvgLevel || '알 수 없음';
-      const combatPower = p?.CombatPower != null
-        ? Number(p.CombatPower || 0).toLocaleString('ko-KR')
-        : '정보 없음';
+      let combatPowerText = '정보 없음';
+      if (p?.CombatPower != null && p.CombatPower !== 0) {
+        const cpNum = Number(p.CombatPower) || 0;
+        combatPowerText = cpNum.toLocaleString('ko-KR');
+      }
+
       const cls    = p?.CharacterClassName || '직업 정보 없음';
       const server = p?.ServerName || '서버 정보 없음';
       const img    = p?.CharacterImage || null;
@@ -205,10 +208,14 @@ client.on('interactionCreate', async (i) => {
       // 아크 패시브 디테일
       let arkPassiveText = '등록된 아크 패시브가 없습니다.';
       try {
+        console.log('[ArkPassive raw]', JSON.stringify(ark)); // 디버그용
+
         let list = [];
         if (Array.isArray(ark)) list = ark;
         else if (Array.isArray(ark?.ArkPassivePoint))  list = ark.ArkPassivePoint;
         else if (Array.isArray(ark?.ArkPassivePoints)) list = ark.ArkPassivePoints;
+        else if (Array.isArray(ark?.Points))           list = ark.Points;
+        else if (Array.isArray(ark?.ArkPassives))      list = ark.ArkPassives;
 
         if (list.length > 0) {
           arkPassiveText = list
@@ -228,14 +235,22 @@ client.on('interactionCreate', async (i) => {
         .setDescription(`${server} 서버 • ${cls}`)
         .addFields(
           { name: '아이템 레벨', value: String(itemLevel), inline: true },
-          { name: '전투력', value: String(combatPower), inline: true },
-          { name: '아크 패시브', value: arkPassiveText },
+          { name: '전투력', value: combatPowerText, inline: true },
+          { name: '아크 패시브', value: arkPassiveText || '정보 없음' },
         )
         .setColor(0x3498db);
 
       if (img) detailEmbed.setThumbnail(img);
 
-      await i.reply({ embeds: [detailEmbed], ephemeral: true });
+      // 메인 목록 + 상세를 "같은 메시지 안에" 표시
+      const ownerLink = links[ownerId];
+      const main = ownerLink?.main || selectedName;
+      const view = await buildPersonalView(ownerId, main, i.channelId);
+
+      await i.update({
+        embeds: [view.embed, detailEmbed],
+        components: view.components,
+      });
     } catch (e) {
       console.error('char-detail error:', e?.response?.data || e);
       await i.reply({ content: '❌ 캐릭터 상세 정보를 불러오지 못했습니다.', ephemeral: true });
@@ -550,7 +565,7 @@ async function buildPersonalView(userId, mainName, channelId) {
     const profile = await getProfile(mainChar.CharacterName, { force: true });
     const p = profile?.ArmoryProfile || profile;
 
-    if (p?.CombatPower != null) {
+    if (p?.CombatPower != null && p.CombatPower !== 0) {
       const cpNum = Number(p.CombatPower) || 0;
       combatPowerText = cpNum.toLocaleString('ko-KR');
     }
@@ -559,7 +574,7 @@ async function buildPersonalView(userId, mainName, channelId) {
     }
   } catch (e) {
     console.error('getProfile error:', e?.response?.data || e);
-    combatPowerText = '불러오기 실패';
+    combatPowerText = '정보 없음';
   }
 
   // 3) 메인캐릭 아크 패시브 요약
@@ -572,6 +587,8 @@ async function buildPersonalView(userId, mainName, channelId) {
     if (Array.isArray(ark)) list = ark;
     else if (Array.isArray(ark?.ArkPassivePoint))  list = ark.ArkPassivePoint;
     else if (Array.isArray(ark?.ArkPassivePoints)) list = ark.ArkPassivePoints;
+    else if (Array.isArray(ark?.Points))           list = ark.Points;
+    else if (Array.isArray(ark?.ArkPassives))      list = ark.ArkPassives;
 
     if (list.length > 0) {
       arkPassiveText = list
@@ -585,7 +602,7 @@ async function buildPersonalView(userId, mainName, channelId) {
     }
   } catch (e) {
     console.error('getArkPassive error:', e?.response?.data || e);
-    arkPassiveText = '불러오기 실패';
+    arkPassiveText = '정보 없음';
   }
 
   const displayName = await getDisplayName(userId, channelId);
