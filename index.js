@@ -52,7 +52,7 @@ const api = axios.create({
 });
 
 const cache = new Map();           // url -> { data, ts }
-const TTL_MS = 60 * 1000;          // 1분 (운영에서 5~10분 권장)
+const TTL_MS = 60 * 1000;          // 1분 (운영에서는 5~10분 권장)
 
 async function cachedGet(url, { force = false } = {}) {
   const now = Date.now();
@@ -255,17 +255,18 @@ client.on('interactionCreate', async (i) => {
         .setColor(0x3498db);
 
       if (img) {
-        // 상세 보기에서도 오른쪽 썸네일로
-        detailEmbed.setThumbnail(img);
+        // 상세 보기에서는 아래에 크게
+        detailEmbed.setImage(img);
       }
 
-      // 선택한 유저의 메인 뷰 다시 생성해서, 같은 메시지 안에 목록 + 상세 같이 표시
+      // 선택한 유저의 메인 뷰 다시 생성
       const ownerLink = links[ownerId];
       const main = ownerLink?.main || selectedName;
       const view = await buildPersonalView(ownerId, main, i.channelId);
 
+      // 메인 목록(텍스트+이미지) + 상세 임베드
       await i.update({
-        embeds: [view.embed, detailEmbed],
+        embeds: [...view.embeds, detailEmbed],
         components: view.components,
       });
     } catch (e) {
@@ -602,8 +603,8 @@ async function buildPersonalView(userId, mainName, channelId) {
 
   const displayName = await getDisplayName(userId, channelId);
 
-  // 4) 메인 Embed
-  const embed = new EmbedBuilder()
+  // 4) 메인 Embed (텍스트 전용)
+  const textEmbed = new EmbedBuilder()
     .setTitle(`**${displayName}**님의 캐릭터 목록`)
     .setDescription(lines.join('\n'))
     .setColor(0x00ae86)
@@ -611,19 +612,23 @@ async function buildPersonalView(userId, mainName, channelId) {
       text: `${BOARD_TAG} 개인 • 마지막 갱신: ${new Date().toLocaleString('ko-KR', {
         timeZone: 'Asia/Seoul',
       })}`,
-    });
+    })
+    .addFields(
+      { name: '⚔ 전투력 (메인캐릭)',      value: combatPowerText, inline: true },
+      { name: '🌌 아크 패시브 (메인캐릭)', value: arkPassiveText,  inline: false },
+    );
 
+  // 5) 오른쪽 큰 이미지처럼 보이게 할 embed
+  let imageEmbed = null;
   if (charImageUrl) {
-    // 메인 카드에서도 오른쪽 썸네일
-    embed.setThumbnail(charImageUrl);
+    imageEmbed = new EmbedBuilder()
+      .setImage(charImageUrl)
+      .setColor(0x000000);
   }
 
-  embed.addFields(
-    { name: '⚔ 전투력 (메인캐릭)',      value: combatPowerText, inline: true },
-    { name: '🌌 아크 패시브 (메인캐릭)', value: arkPassiveText,  inline: false },
-  );
+  const embeds = imageEmbed ? [textEmbed, imageEmbed] : [textEmbed];
 
-  // 5) 드롭다운(캐릭 선택)
+  // 6) 드롭다운(캐릭 선택)
   const select = new StringSelectMenuBuilder()
     .setCustomId(`char-detail:${userId}`)
     .setPlaceholder('자세히 볼 캐릭터 선택')
@@ -637,13 +642,13 @@ async function buildPersonalView(userId, mainName, channelId) {
 
   const row = new ActionRowBuilder().addComponents(select);
 
-  return { embed, components: [row] };
+  return { embeds, components: [row] };
 }
 
 // /mychars 응답
 async function replyMyChars(i, mainName, isPublic = false) {
   const view = await buildPersonalView(i.user.id, mainName, i.channelId);
-  const payload = { embeds: [view.embed], components: view.components };
+  const payload = { embeds: view.embeds, components: view.components };
   if (!isPublic) payload.flags = EPHEMERAL;
 
   if (i.replied || i.deferred) {
@@ -667,12 +672,12 @@ async function ensurePersonalPinnedInChannel(channelId, userId, mainName) {
   const view = await buildPersonalView(userId, mainName, channelId);
 
   if (!existing) {
-    const msg = await ch.send({ embeds: [view.embed], components: view.components }); // 공개
+    const msg = await ch.send({ embeds: view.embeds, components: view.components }); // 공개
     links[userId] = { ...me, personal: { channelId: ch.id, messageId: msg.id } };
     saveJSON(LINKS_PATH, links);
     return 'created';
   } else {
-    await existing.edit({ embeds: [view.embed], components: view.components });
+    await existing.edit({ embeds: view.embeds, components: view.components });
     links[userId] = { ...me, personal: { channelId: ch.id, messageId: existing.id } };
     saveJSON(LINKS_PATH, links);
     return 'updated';
@@ -721,7 +726,7 @@ async function refreshAllPersonalOnce() {
         continue;
       }
       const view = await buildPersonalView(userId, main, p.channelId);
-      await msg.edit({ embeds: [view.embed], components: view.components });
+      await msg.edit({ embeds: view.embeds, components: view.components });
       console.log('[EDIT OK personal]', userId, p.channelId, p.messageId);
     } catch (e) {
       console.error('[EDIT FAIL personal]', userId, e?.rawError ?? e);
