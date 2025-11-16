@@ -208,11 +208,6 @@ client.on('interactionCreate', async (i) => {
     const ownerId = i.customId.split(':')[1];
     const selectedName = i.values[0];
 
-    // 본인만 상세 보기 (원하면 이 if 제거해도 됨)
-    if (i.user.id !== ownerId) {
-      return i.reply({ content: '이 메뉴는 해당 유저만 사용할 수 있습니다.', ephemeral: true });
-    }
-
     try {
       const profile = await getProfile(selectedName, { force: true });
       const ark     = await getArkPassive(selectedName, { force: true });
