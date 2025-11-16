@@ -19,15 +19,15 @@ import { Agent as HttpAgent } from 'http';
 import { Agent as HttpsAgent } from 'https';
 
 // ===================== 기본 설정 =====================
-const REFRESH_INTERVAL_MS   = 10 * 60 * 1000; // 10분
-const API_DELAY_PER_USER_MS = 300;            // Lost Ark API 호출 사이 지연
-const EDIT_DELAY_MS         = 500;            // 메시지 편집 사이 지연
-const SCAN_LIMIT_PER_CHANNEL = 50;            // 채널당 최근 N개 메시지 탐색
+const REFRESH_INTERVAL_MS    = 10 * 60 * 1000; // 10분
+const API_DELAY_PER_USER_MS  = 300;            // Lost Ark API 호출 사이 지연
+const EDIT_DELAY_MS          = 500;            // 메시지 편집 사이 지연
+const SCAN_LIMIT_PER_CHANNEL = 50;             // 채널당 최근 N개 메시지 탐색
 const PERSIST_DIR = '.';
-const EPHEMERAL   = 1 << 6;                   // interaction flags
+const EPHEMERAL   = 1 << 6;                    // interaction flags
 const BOARD_TAG   = '[LOA_BOARD]';
 
-// ===================== HTTP keep-alive: 부팅 즉시 시작 =====================
+// ===================== HTTP keep-alive =====================
 const PORT = process.env.PORT || 8080;
 http.createServer((_, res) => res.end('ok')).listen(PORT, () => {
   console.log('🌐 HTTP keep-alive server listening on', PORT);
@@ -52,7 +52,7 @@ const api = axios.create({
 });
 
 const cache = new Map();           // url -> { data, ts }
-const TTL_MS = 60 * 1000;          // 1분 (운영 5~10분 권장)
+const TTL_MS = 60 * 1000;          // 1분 (운영에서 5~10분 권장)
 
 async function cachedGet(url, { force = false } = {}) {
   const now = Date.now();
@@ -183,7 +183,7 @@ client.on('interactionCreate', async (i) => {
     const ownerId = i.customId.split(':')[1];
     const selectedName = i.values[0];
 
-    // 본인만 상세 보기 가능 (원하면 주석 처리해도 됨)
+    // 본인만 상세 보기 가능 (원하면 이 if 블록 제거해도 됨)
     if (i.user.id !== ownerId) {
       return i.reply({ content: '이 메뉴는 해당 유저만 사용할 수 있습니다.', ephemeral: true });
     }
@@ -195,10 +195,15 @@ client.on('interactionCreate', async (i) => {
       const p = profile?.ArmoryProfile || profile;
 
       const itemLevel = p?.ItemAvgLevel || '알 수 없음';
+
+      // 전투력: 값이 있으면 그대로 찍기
       let combatPowerText = '정보 없음';
-      if (p?.CombatPower != null && p.CombatPower !== 0) {
-        const cpNum = Number(p.CombatPower) || 0;
-        combatPowerText = cpNum.toLocaleString('ko-KR');
+      if (p?.CombatPower != null) {
+        const raw  = String(p.CombatPower).replace(/,/g, '');
+        const cpNum = Number(raw);
+        combatPowerText = Number.isFinite(cpNum)
+          ? cpNum.toLocaleString('ko-KR')
+          : String(p.CombatPower);
       }
 
       const cls    = p?.CharacterClassName || '직업 정보 없음';
@@ -208,14 +213,16 @@ client.on('interactionCreate', async (i) => {
       // 아크 패시브 디테일
       let arkPassiveText = '등록된 아크 패시브가 없습니다.';
       try {
-        console.log('[ArkPassive raw]', JSON.stringify(ark)); // 디버그용
+        console.log('[ArkPassive raw detail]', JSON.stringify(ark)); // 디버그용
 
         let list = [];
-        if (Array.isArray(ark)) list = ark;
-        else if (Array.isArray(ark?.ArkPassivePoint))  list = ark.ArkPassivePoint;
-        else if (Array.isArray(ark?.ArkPassivePoints)) list = ark.ArkPassivePoints;
-        else if (Array.isArray(ark?.Points))           list = ark.Points;
-        else if (Array.isArray(ark?.ArkPassives))      list = ark.ArkPassives;
+        if (Array.isArray(ark?.ArkPassivePoints)) {
+          list = ark.ArkPassivePoints;
+        } else if (Array.isArray(ark?.ArkPassivePoint)) {
+          list = ark.ArkPassivePoint;
+        } else if (Array.isArray(ark)) {
+          list = ark;
+        }
 
         if (list.length > 0) {
           arkPassiveText = list
@@ -235,14 +242,14 @@ client.on('interactionCreate', async (i) => {
         .setDescription(`${server} 서버 • ${cls}`)
         .addFields(
           { name: '아이템 레벨', value: String(itemLevel), inline: true },
-          { name: '전투력', value: combatPowerText, inline: true },
+          { name: '전투력',      value: combatPowerText,   inline: true },
           { name: '아크 패시브', value: arkPassiveText || '정보 없음' },
         )
         .setColor(0x3498db);
 
       if (img) detailEmbed.setThumbnail(img);
 
-      // 메인 목록 + 상세를 "같은 메시지 안에" 표시
+      // 선택한 유저의 메인 뷰 다시 생성해서, 같은 메시지 안에 목록 + 상세 같이 표시
       const ownerLink = links[ownerId];
       const main = ownerLink?.main || selectedName;
       const view = await buildPersonalView(ownerId, main, i.channelId);
@@ -382,7 +389,7 @@ client.on('interactionCreate', async (i) => {
   if (i.commandName === 'board-refresh') {
     await i.deferReply({ flags: EPHEMERAL });
     try {
-      await refreshAllBoards(true);
+      await refreshAllBoards();
       await refreshAllPersonalOnce();
       await i.editReply('🔄 모든 보드를 즉시 갱신했습니다.');
     } catch (e) {
@@ -429,7 +436,7 @@ async function ensureBoardInChannel(channelId) {
   }
 
   // 새로 생성
-  const embed = await buildBoardEmbed(true);
+  const embed = await buildBoardEmbed();
   const msg = await ch.send({ embeds: [embed] });
   return msg;
 }
@@ -485,7 +492,7 @@ async function refreshAllBoards() {
         console.error('[EDIT FAIL] message not found', b.channelId, b.messageId);
         continue;
       }
-      const embed = await buildBoardEmbed(true);
+      const embed = await buildBoardEmbed();
       await msg.edit({ embeds: [embed] });
     } catch (e) {
       console.error('[EDIT FAIL]', b.channelId, b.messageId, e?.rawError ?? e);
@@ -565,9 +572,12 @@ async function buildPersonalView(userId, mainName, channelId) {
     const profile = await getProfile(mainChar.CharacterName, { force: true });
     const p = profile?.ArmoryProfile || profile;
 
-    if (p?.CombatPower != null && p.CombatPower !== 0) {
-      const cpNum = Number(p.CombatPower) || 0;
-      combatPowerText = cpNum.toLocaleString('ko-KR');
+    if (p?.CombatPower != null) {
+      const raw  = String(p.CombatPower).replace(/,/g, '');
+      const cpNum = Number(raw);
+      combatPowerText = Number.isFinite(cpNum)
+        ? cpNum.toLocaleString('ko-KR')
+        : String(p.CombatPower);
     }
     if (p?.CharacterImage) {
       charImageUrl = p.CharacterImage;
@@ -582,13 +592,16 @@ async function buildPersonalView(userId, mainName, channelId) {
 
   try {
     const ark = await getArkPassive(mainChar.CharacterName, { force: true });
+    console.log('[ArkPassive raw personal]', JSON.stringify(ark)); // 디버그용
 
     let list = [];
-    if (Array.isArray(ark)) list = ark;
-    else if (Array.isArray(ark?.ArkPassivePoint))  list = ark.ArkPassivePoint;
-    else if (Array.isArray(ark?.ArkPassivePoints)) list = ark.ArkPassivePoints;
-    else if (Array.isArray(ark?.Points))           list = ark.Points;
-    else if (Array.isArray(ark?.ArkPassives))      list = ark.ArkPassives;
+    if (Array.isArray(ark?.ArkPassivePoints)) {
+      list = ark.ArkPassivePoints;
+    } else if (Array.isArray(ark?.ArkPassivePoint)) {
+      list = ark.ArkPassivePoint;
+    } else if (Array.isArray(ark)) {
+      list = ark;
+    }
 
     if (list.length > 0) {
       arkPassiveText = list
@@ -690,7 +703,7 @@ function startAutoRefresh() {
   const tick = async () => {
     console.log('[TICK]', new Date().toISOString(), `managedBoards=${boards.length}`);
     try {
-      await refreshAllBoards(true);
+      await refreshAllBoards();
       await refreshAllPersonalOnce();
     } catch (e) {
       console.error('auto refresh error:', e);
@@ -733,7 +746,7 @@ async function refreshAllPersonalOnce() {
   }
 }
 
-// ===================== 닉네임(표시이름) 전용 헬퍼 =====================
+// ===================== 닉네임(표시이름) 헬퍼 =====================
 async function getDisplayName(userId, channelId) {
   const ch = await client.channels.fetch(channelId);
   const member = await ch.guild.members.fetch(userId);
@@ -748,5 +761,5 @@ function wait(ms) {
 // ===================== 로그인 시작 =====================
 loginWithRetry().catch((e) => {
   console.error('FATAL login error:', e?.message || e);
-  // HTTP 서버는 이미 리슨 중이므로 프로세스는 그냥 유지
+  // HTTP 서버는 이미 리슨 중이므로 프로세스는 유지
 });
