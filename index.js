@@ -80,6 +80,27 @@ async function getArkPassive(name, opts) {
   return cachedGet(url, opts);
 }
 
+// 아크 패시브 리스트 추출 헬퍼
+function extractArkList(ark) {
+  if (!ark) return [];
+  // 배열 그대로 오는 경우
+  if (Array.isArray(ark)) return ark;
+
+  let list = [];
+  if (Array.isArray(ark.ArkPassivePoints)) list = ark.ArkPassivePoints;
+  else if (Array.isArray(ark.ArkPassivePoint)) list = ark.ArkPassivePoint;
+
+  // 위에서 못 찾았으면, 객체 안의 모든 배열 중 key에 'Passive' / 'Ark' 들어간 것들을 다 긁기
+  if (list.length === 0 && typeof ark === 'object') {
+    for (const [k, v] of Object.entries(ark)) {
+      if (Array.isArray(v) && /passive|ark/i.test(k)) {
+        list = list.concat(v);
+      }
+    }
+  }
+  return list;
+}
+
 // ===================== 파일 I/O =====================
 function loadJSON(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
@@ -215,19 +236,7 @@ client.on('interactionCreate', async (i) => {
       try {
         console.log('[ArkPassive raw detail]', JSON.stringify(ark)); // 디버그용
 
-        let list = [];
-
-        if (Array.isArray(ark?.ArkPassivePoints)) {
-          list = ark.ArkPassivePoints;
-        } else if (Array.isArray(ark?.ArkPassivePoint)) {
-          list = ark.ArkPassivePoint;
-        } else if (ark?.ArkPassivePoints) {
-          list = [ark.ArkPassivePoints];
-        } else if (ark?.ArkPassivePoint) {
-          list = [ark.ArkPassivePoint];
-        } else if (Array.isArray(ark)) {
-          list = ark;
-        }
+        const list = extractArkList(ark);
 
         if (list.length > 0) {
           arkPassiveText = list
@@ -237,11 +246,6 @@ client.on('interactionCreate', async (i) => {
               return level != null ? `${name} (Lv.${level})` : name;
             })
             .join('\n');
-        } else {
-          // 그래도 파싱 안 되면 raw 일부라도 보여주기
-          arkPassiveText = '데이터 파싱 실패\n```json\n'
-            + JSON.stringify(ark, null, 2).slice(0, 400)
-            + '\n```';
         }
       } catch (e2) {
         console.error('ark passive detail error:', e2?.response?.data || e2);
@@ -258,7 +262,7 @@ client.on('interactionCreate', async (i) => {
         .setColor(0x3498db);
 
       if (img) {
-        // 상세 보기에서는 사진 크게
+        // 상세 보기에서는 사진 크게 (카드 폭 전체)
         detailEmbed.setImage(img);
       }
 
@@ -296,17 +300,12 @@ client.on('interactionCreate', async (i) => {
       // 1) 본인 미리보기(에페메랄)
       await replyMyChars(i, name, false);
 
-      // 2) 개인 고정 메시지까지 자동 생성/갱신
+      // 2) 개인 고정 메시지 자동 생성/갱신 (성공 시에는 따로 메시지 안 띄움)
       try {
-        const res = await ensurePersonalPinnedInChannel(i.channelId, i.user.id, name);
-        await i.followUp({
-          content: res === 'created'
-            ? '📌 개인 캐릭터 목록을 채널에 고정했습니다.'
-            : '🔄 개인 캐릭터 목록을 갱신했습니다.',
-          flags: EPHEMERAL,
-        }).catch(() => {});
+        await ensurePersonalPinnedInChannel(i.channelId, i.user.id, name);
       } catch (e2) {
         console.error('auto pin after link error:', e2?.rawError ?? e2);
+        // 진짜 에러일 때만 안내 메시지
         await i.followUp({
           content: '⚠️ 개인 고정 메시지 생성/갱신 실패. `/mychars-pin`을 직접 실행해 주세요.',
           flags: EPHEMERAL,
@@ -607,18 +606,7 @@ async function buildPersonalView(userId, mainName, channelId) {
     const ark = await getArkPassive(mainChar.CharacterName, { force: true });
     console.log('[ArkPassive raw personal]', JSON.stringify(ark)); // 디버그용
 
-    let list = [];
-    if (Array.isArray(ark?.ArkPassivePoints)) {
-      list = ark.ArkPassivePoints;
-    } else if (Array.isArray(ark?.ArkPassivePoint)) {
-      list = ark.ArkPassivePoint;
-    } else if (ark?.ArkPassivePoints) {
-      list = [ark.ArkPassivePoints];
-    } else if (ark?.ArkPassivePoint) {
-      list = [ark.ArkPassivePoint];
-    } else if (Array.isArray(ark)) {
-      list = ark;
-    }
+    const list = extractArkList(ark);
 
     if (list.length > 0) {
       arkPassiveText = list
@@ -629,10 +617,6 @@ async function buildPersonalView(userId, mainName, channelId) {
         })
         .slice(0, 5)
         .join('\n');
-    } else {
-      arkPassiveText = '데이터 파싱 실패\n```json\n'
-        + JSON.stringify(ark, null, 2).slice(0, 400)
-        + '\n```';
     }
   } catch (e) {
     console.error('getArkPassive error:', e?.response?.data || e);
@@ -653,7 +637,7 @@ async function buildPersonalView(userId, mainName, channelId) {
     });
 
   if (charImageUrl) {
-    // 목록 카드에서도 사진 크게
+    // 목록 카드에서도 사진 크게 (카드 폭 전체)
     embed.setImage(charImageUrl);
   }
 
@@ -706,12 +690,12 @@ async function ensurePersonalPinnedInChannel(channelId, userId, mainName) {
   const view = await buildPersonalView(userId, mainName, channelId);
 
   if (!existing) {
-    const msg = await ch.send({ embeds: [view.embed], components: view.components }); // 공개
+    const msg = await ch.send({ embeds: [view.embed], components: [view.components[0]] }); // 공개
     links[userId] = { ...me, personal: { channelId: ch.id, messageId: msg.id } };
     saveJSON(LINKS_PATH, links);
     return 'created';
   } else {
-    await existing.edit({ embeds: [view.embed], components: view.components });
+    await existing.edit({ embeds: [view.embed], components: [view.components[0]] });
     links[userId] = { ...me, personal: { channelId: ch.id, messageId: existing.id } };
     saveJSON(LINKS_PATH, links);
     return 'updated';
