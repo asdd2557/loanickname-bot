@@ -80,25 +80,43 @@ async function getArkPassive(name, opts) {
   return cachedGet(url, opts);
 }
 
-// 아크 패시브 리스트 추출 헬퍼
-function extractArkList(ark) {
-  if (!ark) return [];
-  // 배열 그대로 오는 경우
-  if (Array.isArray(ark)) return ark;
+// ===================== 아크 패시브 헬퍼 =====================
+function stripTags(html = '') {
+  return String(html)
+    .replace(/<[^>]+>/g, ' ')  // 태그 제거
+    .replace(/\s+/g, ' ')      // 공백 정리
+    .trim();
+}
 
-  let list = [];
-  if (Array.isArray(ark.ArkPassivePoints)) list = ark.ArkPassivePoints;
-  else if (Array.isArray(ark.ArkPassivePoint)) list = ark.ArkPassivePoint;
+// ark 응답(JSON)을 보기 좋은 텍스트로 변환
+function formatArkPassive(ark, { maxPoints = 3, maxEffects = 3 } = {}) {
+  if (!ark) return '등록된 아크 패시브가 없습니다.';
 
-  // 위에서 못 찾았으면, 객체 안의 모든 배열 중 key에 'Passive' / 'Ark' 들어간 것들을 다 긁기
-  if (list.length === 0 && typeof ark === 'object') {
-    for (const [k, v] of Object.entries(ark)) {
-      if (Array.isArray(v) && /passive|ark/i.test(k)) {
-        list = list.concat(v);
-      }
-    }
+  const points  = Array.isArray(ark.Points)  ? ark.Points  : [];
+  const effects = Array.isArray(ark.Effects) ? ark.Effects : [];
+
+  const lines = [];
+
+  if (points.length) {
+    lines.push('**포인트**');
+    points.slice(0, maxPoints).forEach(p => {
+      const desc  = stripTags(p.Description || '');
+      const value = p.Value != null ? ` (${p.Value} 포인트)` : '';
+      lines.push(`• ${p.Name}${value}${desc ? ` - ${desc}` : ''}`);
+    });
   }
-  return list;
+
+  if (effects.length) {
+    lines.push('', '**효과**');
+    effects.slice(0, maxEffects).forEach(e => {
+      const name = stripTags(e.Name || '');
+      const desc = stripTags(e.Description || '');
+      lines.push(`• ${name}${desc ? ` - ${desc}` : ''}`);
+    });
+  }
+
+  if (!lines.length) return '등록된 아크 패시브가 없습니다.';
+  return lines.join('\n');
 }
 
 // ===================== 파일 I/O =====================
@@ -204,7 +222,7 @@ client.on('interactionCreate', async (i) => {
     const ownerId = i.customId.split(':')[1];
     const selectedName = i.values[0];
 
-    // 본인만 상세 보기 가능 (원하면 이 if 블록 제거해도 됨)
+    // 본인만 상세 보기 가능 (필요 없으면 이 if 삭제해도 됨)
     if (i.user.id !== ownerId) {
       return i.reply({ content: '이 메뉴는 해당 유저만 사용할 수 있습니다.', ephemeral: true });
     }
@@ -217,7 +235,7 @@ client.on('interactionCreate', async (i) => {
 
       const itemLevel = p?.ItemAvgLevel || '알 수 없음';
 
-      // 전투력: 값이 있으면 그대로 찍기
+      // 전투력
       let combatPowerText = '정보 없음';
       if (p?.CombatPower != null) {
         const raw  = String(p.CombatPower).replace(/,/g, '');
@@ -234,19 +252,8 @@ client.on('interactionCreate', async (i) => {
       // 아크 패시브 디테일
       let arkPassiveText = '등록된 아크 패시브가 없습니다.';
       try {
-        console.log('[ArkPassive raw detail]', JSON.stringify(ark)); // 디버그용
-
-        const list = extractArkList(ark);
-
-        if (list.length > 0) {
-          arkPassiveText = list
-            .map(pp => {
-              const name  = pp.Name || pp.ArkPassiveName || pp.PassiveName || '이름 없음';
-              const level = pp.Level ?? pp.Point ?? pp.Points;
-              return level != null ? `${name} (Lv.${level})` : name;
-            })
-            .join('\n');
-        }
+        console.log('[ArkPassive raw detail]', JSON.stringify(ark));
+        arkPassiveText = formatArkPassive(ark, { maxPoints: 5, maxEffects: 5 });
       } catch (e2) {
         console.error('ark passive detail error:', e2?.response?.data || e2);
       }
@@ -262,7 +269,7 @@ client.on('interactionCreate', async (i) => {
         .setColor(0x3498db);
 
       if (img) {
-        // 상세 보기에서는 사진 크게 (카드 폭 전체)
+        // 상세 보기에서는 크게 (카드 폭 전체)
         detailEmbed.setImage(img);
       }
 
@@ -357,12 +364,9 @@ client.on('interactionCreate', async (i) => {
     }
     await i.deferReply({ flags: EPHEMERAL });
     try {
-      const res = await ensurePersonalPinnedInChannel(i.channelId, i.user.id, me.main);
-      await i.editReply(
-        res === 'created'
-          ? '📌 개인 캐릭터 목록을 고정했습니다.'
-          : '🔄 개인 캐릭터 목록을 갱신했습니다.',
-      );
+      await ensurePersonalPinnedInChannel(i.channelId, i.user.id, me.main);
+      // ✅ 성공 시에는 에페메랄 메시지 바로 삭제 (알림 안 보이게)
+      await i.deleteReply();
     } catch (e) {
       console.error('mychars-pin error:', e?.rawError ?? e);
       await i.editReply('❌ 개인 메시지 고정/갱신에 실패했어요.');
@@ -604,20 +608,8 @@ async function buildPersonalView(userId, mainName, channelId) {
 
   try {
     const ark = await getArkPassive(mainChar.CharacterName, { force: true });
-    console.log('[ArkPassive raw personal]', JSON.stringify(ark)); // 디버그용
-
-    const list = extractArkList(ark);
-
-    if (list.length > 0) {
-      arkPassiveText = list
-        .map((p) => {
-          const name  = p.Name || p.ArkPassiveName || p.PassiveName || '이름 없음';
-          const level = p.Level ?? p.Point ?? p.Points;
-          return level != null ? `${name} (Lv.${level})` : name;
-        })
-        .slice(0, 5)
-        .join('\n');
-    }
+    console.log('[ArkPassive raw personal]', JSON.stringify(ark));
+    arkPassiveText = formatArkPassive(ark, { maxPoints: 3, maxEffects: 3 });
   } catch (e) {
     console.error('getArkPassive error:', e?.response?.data || e);
     arkPassiveText = '정보 없음';
@@ -637,12 +629,12 @@ async function buildPersonalView(userId, mainName, channelId) {
     });
 
   if (charImageUrl) {
-    // 목록 카드에서도 사진 크게 (카드 폭 전체)
-    embed.setImage(charImageUrl);
+    // ✅ 메인 카드에서는 오른쪽 썸네일 (글씨 오른쪽)
+    embed.setThumbnail(charImageUrl);
   }
 
   embed.addFields(
-    { name: '⚔ 전투력 (메인캐릭)', value: combatPowerText, inline: true },
+    { name: '⚔ 전투력 (메인캐릭)',  value: combatPowerText, inline: true },
     { name: '🌌 아크 패시브 (메인캐릭)', value: arkPassiveText, inline: false },
   );
 
@@ -690,12 +682,12 @@ async function ensurePersonalPinnedInChannel(channelId, userId, mainName) {
   const view = await buildPersonalView(userId, mainName, channelId);
 
   if (!existing) {
-    const msg = await ch.send({ embeds: [view.embed], components: [view.components[0]] }); // 공개
+    const msg = await ch.send({ embeds: [view.embed], components: view.components }); // 공개
     links[userId] = { ...me, personal: { channelId: ch.id, messageId: msg.id } };
     saveJSON(LINKS_PATH, links);
     return 'created';
   } else {
-    await existing.edit({ embeds: [view.embed], components: [view.components[0]] });
+    await existing.edit({ embeds: [view.embed], components: view.components });
     links[userId] = { ...me, personal: { channelId: ch.id, messageId: existing.id } };
     saveJSON(LINKS_PATH, links);
     return 'updated';
